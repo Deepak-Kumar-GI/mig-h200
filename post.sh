@@ -68,7 +68,7 @@ while true; do
     # SUCCESS
     if [[ "${MIG_STATE}" == "success" ]]; then
         if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
-            error "MIG state became SUCCESS too early (attempt $count)."
+            error "MIG state became SUCCESS too early (attempt $count). Apply the temp and then config label again."
             exit 1
         fi
         log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
@@ -80,7 +80,7 @@ while true; do
         warn "MIG state reported FAILED (Failure count: ${FAILED_COUNT}/${MAX_FAILED_ALLOWED})"
 
         if [[ $FAILED_COUNT -ge $MAX_FAILED_ALLOWED ]]; then
-            error "Node ${WORKER_NODE} MIG configuration FAILED after ${FAILED_COUNT} attempts."
+            error "Node ${WORKER_NODE} MIG configuration FAILED after ${FAILED_COUNT} attempts. Apply the temp and then config label again."
             exit 1
         fi
 
@@ -101,7 +101,7 @@ while true; do
 
     # Unexpected
     else
-        error "Unexpected MIG state: '${MIG_STATE}'"
+        error "Unexpected MIG state: '${MIG_STATE}'. Apply the temp and then config label again."
         exit 1
     fi
 done
