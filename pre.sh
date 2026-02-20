@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================
-#  NVIDIA GPU Pre-Configuration Utility with Logs Folder
+# NVIDIA GPU Pre-Configuration Utility with Timestamped Logs
 # ==============================================================
 
 set -euo pipefail
@@ -21,32 +21,37 @@ fi
 
 echo $$ 1>&200
 
+# --------------------------------------------------------------
+# Node & Namespace
+# --------------------------------------------------------------
 WORKER_NODE="gu-k8s-worker"
 GPU_OPERATOR_NAMESPACE="gpu-operator"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
-# -------------------------------
-# Logs & Backup Setup
-# -------------------------------
+# --------------------------------------------------------------
+# Logs & Backup Setup (Timestamped folder)
+# --------------------------------------------------------------
 BASE_LOG_DIR="logs"
-PRE_LOG_DIR="${BASE_LOG_DIR}/pre"
-BACKUP_DIR="${BASE_LOG_DIR}/backup/backup-$(date +%Y%m%d-%H%M%S)"
+TIMESTAMP_FOLDER=$(date +%Y%m%d-%H%M%S)
+RUN_LOG_DIR="${BASE_LOG_DIR}/${TIMESTAMP_FOLDER}"
+BACKUP_DIR="${RUN_LOG_DIR}/backup"
 
-mkdir -p "$PRE_LOG_DIR" "$BACKUP_DIR"
+mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
 
-log_file="${PRE_LOG_DIR}/preconfig_$(date +%Y%m%d-%H%M%S).log"
+log_file="${RUN_LOG_DIR}/pre.log"
 
 log() { echo "[$(date +"%H:%M:%S")] [INFO] $1" | tee -a "$log_file"; }
 warn() { echo "[$(date +"%H:%M:%S")] [WARN] $1" | tee -a "$log_file"; }
 error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
-# -------------------------------
+# --------------------------------------------------------------
 # Script Start
-# -------------------------------
+# --------------------------------------------------------------
 log "=============================================================="
 log " NVIDIA GPU Pre-Configuration"
 log " Node        : ${WORKER_NODE}"
 log " Started At  : ${TIMESTAMP}"
+log " Run Folder  : ${RUN_LOG_DIR}"
 log "=============================================================="
 
 # Backup ClusterPolicy
@@ -74,9 +79,9 @@ kubectl get nodes -l nvidia.com/mig.config \
 
 log "Backup phase completed successfully."
 
-# -------------------------------
+# --------------------------------------------------------------
 # Runtime Configuration
-# -------------------------------
+# --------------------------------------------------------------
 log "Checking NVIDIA runtime mode on ${WORKER_NODE}..."
 
 CURRENT_MODE=$(ssh "${WORKER_NODE}" \
@@ -98,9 +103,9 @@ else
     log "Runtime already set to AUTO. No action required."
 fi
 
-# -------------------------------
+# --------------------------------------------------------------
 # Cordon Node
-# -------------------------------
+# --------------------------------------------------------------
 log "Cordoning node ${WORKER_NODE}..."
 kubectl cordon "${WORKER_NODE}" >> "$log_file" 2>&1 || true
 log "Now no workload can schedule on ${WORKER_NODE} node."
