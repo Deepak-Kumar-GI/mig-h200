@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================
-# NVIDIA GPU Post-Configuration Utility
+# NVIDIA GPU Pre-Configuration Utility with Timestamped Logs
 # ==============================================================
 
 set -euo pipefail
@@ -22,128 +22,98 @@ fi
 echo $$ 1>&200
 
 # --------------------------------------------------------------
-# Variables
+# Node & Namespace
 # --------------------------------------------------------------
 WORKER_NODE="gu-k8s-worker"
-GPU_OPERATOR_NS="gpu-operator"
+GPU_OPERATOR_NAMESPACE="gpu-operator"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
-MAX_RETRIES=15
-SLEEP_INTERVAL=20
-MIN_SUCCESS_ATTEMPT=2
-MAX_FAILED_ALLOWED=2   # Retry failed state up to 2 times
-
 # --------------------------------------------------------------
-# Logs setup
+# Logs & Backup Setup (Timestamped folder)
 # --------------------------------------------------------------
 BASE_LOG_DIR="logs"
-POST_LOG_DIR="${BASE_LOG_DIR}/post"
-mkdir -p "$POST_LOG_DIR"
-log_file="${POST_LOG_DIR}/postconfig_$(date +%Y%m%d-%H%M%S).log"
+TIMESTAMP_FOLDER=$(date +%Y%m%d-%H%M%S)
+RUN_LOG_DIR="${BASE_LOG_DIR}/${TIMESTAMP_FOLDER}"
+BACKUP_DIR="${RUN_LOG_DIR}/backup"
 
-log()   { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
-warn()  { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
+mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
+
+log_file="${RUN_LOG_DIR}/pre.log"
+
+log() { echo "[$(date +"%H:%M:%S")] [INFO] $1" | tee -a "$log_file"; }
+warn() { echo "[$(date +"%H:%M:%S")] [WARN] $1" | tee -a "$log_file"; }
 error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
+# --------------------------------------------------------------
+# Script Start
+# --------------------------------------------------------------
 log "=============================================================="
-log " NVIDIA GPU Post-Configuration"
+log " NVIDIA GPU Pre-Configuration"
 log " Node        : ${WORKER_NODE}"
 log " Started At  : ${TIMESTAMP}"
+log " Run Folder  : ${RUN_LOG_DIR}"
 log "=============================================================="
 
-# --------------------------------------------------------------
-# Wait for MIG state
-# --------------------------------------------------------------
-log "Checking MIG state for node ${WORKER_NODE}..."
+# Backup ClusterPolicy
+log "Backing up ClusterPolicy to ${BACKUP_DIR}..."
+kubectl get clusterpolicies.nvidia.com/cluster-policy -o yaml \
+    > "${BACKUP_DIR}/cluster-policy.yaml"
 
-count=0
-FAILED_COUNT=0
+# Backup MIG ConfigMap if exists
+MIG_CONFIGMAP=$(kubectl get clusterpolicies.nvidia.com/cluster-policy \
+  -o jsonpath='{.spec.migManager.config.name}' 2>/dev/null || true)
 
-while true; do
-    MIG_STATE=$(kubectl get node "${WORKER_NODE}" \
-        -o jsonpath='{.metadata.labels.nvidia\.com/mig\.config\.state}' 2>/dev/null || echo "")
-    
-    log "Current MIG state: '${MIG_STATE}' (Attempt: $count)"
-
-    # SUCCESS
-    if [[ "${MIG_STATE}" == "success" ]]; then
-        if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
-            error "MIG state became SUCCESS too early (attempt $count). Apply the temp and then config label again."
-            exit 1
-        fi
-        log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
-        break
-
-    # FAILED (retry up to MAX_FAILED_ALLOWED)
-    elif [[ "${MIG_STATE}" == "failed" ]]; then
-        FAILED_COUNT=$((FAILED_COUNT+1))
-        warn "MIG state reported FAILED (Failure count: ${FAILED_COUNT}/${MAX_FAILED_ALLOWED})"
-
-        if [[ $FAILED_COUNT -ge $MAX_FAILED_ALLOWED ]]; then
-            error "Node ${WORKER_NODE} MIG configuration FAILED after ${FAILED_COUNT} attempts. Apply the temp and then config label again."
-            exit 1
-        fi
-
-        log "Retrying... waiting ${SLEEP_INTERVAL}s before re-check."
-        sleep $SLEEP_INTERVAL
-        count=$((count+1))
-
-    # PENDING
-    elif [[ "${MIG_STATE}" == "pending" ]]; then
-        if [[ $count -ge $MAX_RETRIES ]]; then
-            error "Timeout waiting for MIG state."
-            exit 1
-        fi
-
-        log "MIG state is PENDING, waiting ${SLEEP_INTERVAL}s..."
-        sleep $SLEEP_INTERVAL
-        count=$((count+1))
-
-    # Unexpected
-    else
-        error "Unexpected MIG state: '${MIG_STATE}'. Apply the temp and then config label again."
-        exit 1
-    fi
-done
-
-log "MIG state validation completed successfully."
-
-# --------------------------------------------------------------
-# Locate MIG Manager Pod
-# --------------------------------------------------------------
-log "Locating MIG Manager pod..."
-MIG_MANAGER_POD=$(kubectl get pods -n ${GPU_OPERATOR_NS} -o wide \
-    | grep mig-manager \
-    | grep "${WORKER_NODE}" \
-    | awk '{print $1}')
-
-if [[ -z "${MIG_MANAGER_POD}" ]]; then
-    error "MIG Manager pod not found."
-    exit 1
+if [[ -n "${MIG_CONFIGMAP}" ]]; then
+    log "MIG ConfigMap detected: ${MIG_CONFIGMAP}"
+    kubectl get configmap "${MIG_CONFIGMAP}" \
+        -n "${GPU_OPERATOR_NAMESPACE}" -o yaml \
+        > "${BACKUP_DIR}/mig-configmap.yaml"
+else
+    warn "No MIG ConfigMap configured."
 fi
 
-log "Executing nvidia-smi inside MIG Manager pod..."
-kubectl exec -n ${GPU_OPERATOR_NS} "${MIG_MANAGER_POD}" -- nvidia-smi
+# Record current MIG node labels
+kubectl get nodes -l nvidia.com/mig.config \
+    -o=custom-columns=NODE:.metadata.name,MIG_CONFIG:.metadata.labels."nvidia\.com/mig\.config" \
+    > "${BACKUP_DIR}/node-mig-labels.txt" || true
+
+log "Backup phase completed successfully."
 
 # --------------------------------------------------------------
-# Generate CDI specification
+# Runtime Configuration
 # --------------------------------------------------------------
-log "Generating static CDI specification..."
-ssh "${WORKER_NODE}" \
-    "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
-    >> "$log_file" 2>&1
+log "Checking NVIDIA runtime mode on ${WORKER_NODE}..."
 
-log "Switching NVIDIA runtime mode to CDI..."
-ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"auto\"/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml"
-ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
+CURRENT_MODE=$(ssh "${WORKER_NODE}" \
+  "grep '^mode' /etc/nvidia-container-runtime/config.toml | awk -F'\"' '{print \$2}'" \
+  || true)
+
+if [[ -z "${CURRENT_MODE}" ]]; then
+    warn "Unable to determine current runtime mode."
+else
+    log "Current runtime mode: ${CURRENT_MODE}"
+fi
+
+if [[ "${CURRENT_MODE}" != "auto" ]]; then
+    log "Switching runtime mode to AUTO..."
+    ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"cdi\"/mode = \"auto\"/' /etc/nvidia-container-runtime/config.toml"
+    ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
+    log "Runtime successfully switched to AUTO."
+else
+    log "Runtime already set to AUTO. No action required."
+fi
 
 # --------------------------------------------------------------
-# Uncordon node
+# Cordon Node
 # --------------------------------------------------------------
-log "Uncordoning node ${WORKER_NODE}..."
-kubectl uncordon "${WORKER_NODE}"
+log "Cordoning node ${WORKER_NODE}..."
+kubectl cordon "${WORKER_NODE}" >> "$log_file" 2>&1 || true
+log "Now no workload can schedule on ${WORKER_NODE} node."
 
 log "--------------------------------------------------------------"
-log " POST-CONFIGURATION COMPLETED SUCCESSFULLY"
-log " Log File : ${log_file}"
+log " PRE-CONFIGURATION COMPLETED SUCCESSFULLY"
+log " Backup Location : ${BACKUP_DIR}"
+log " Log File        : ${log_file}"
 log "--------------------------------------------------------------"
+log "ACTION REQUIRED:"
+log "Stop all GPU workloads on ${WORKER_NODE} before proceeding with MIG reconfiguration."
