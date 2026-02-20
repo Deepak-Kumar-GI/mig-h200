@@ -1,11 +1,25 @@
 #!/bin/bash
 
-# ============================================================== 
+# ==============================================================
 #  NVIDIA GPU Pre-Configuration Utility with Logs Folder
-# ============================================================== 
+# ==============================================================
 
 set -euo pipefail
 trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
+
+# --------------------------------------------------------------
+# Global Lock (Prevents concurrent pre/post execution)
+# --------------------------------------------------------------
+LOCK_FILE="/var/lock/nvidia-mig-config.lock"
+exec 200>"$LOCK_FILE"
+
+if ! flock -n 200; then
+    echo "[ERROR] Another MIG configuration script is already running."
+    echo "Only one of pre.sh or post2.sh can run at a time."
+    exit 1
+fi
+
+echo $$ 1>&200
 
 WORKER_NODE="gu-k8s-worker"
 GPU_OPERATOR_NAMESPACE="gpu-operator"
@@ -60,8 +74,11 @@ kubectl get nodes -l nvidia.com/mig.config \
 
 log "Backup phase completed successfully."
 
+# -------------------------------
 # Runtime Configuration
+# -------------------------------
 log "Checking NVIDIA runtime mode on ${WORKER_NODE}..."
+
 CURRENT_MODE=$(ssh "${WORKER_NODE}" \
   "grep '^mode' /etc/nvidia-container-runtime/config.toml | awk -F'\"' '{print \$2}'" \
   || true)
@@ -80,6 +97,13 @@ if [[ "${CURRENT_MODE}" != "auto" ]]; then
 else
     log "Runtime already set to AUTO. No action required."
 fi
+
+# -------------------------------
+# Cordon Node
+# -------------------------------
+log "Cordoning node ${WORKER_NODE}..."
+kubectl cordon "${WORKER_NODE}" >> "$log_file" 2>&1 || true
+log "Now no workload can schedule on ${WORKER_NODE} node."
 
 log "--------------------------------------------------------------"
 log " PRE-CONFIGURATION COMPLETED SUCCESSFULLY"
