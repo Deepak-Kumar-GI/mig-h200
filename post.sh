@@ -21,6 +21,9 @@ fi
 
 echo $$ 1>&200
 
+# --------------------------------------------------------------
+# Variables
+# --------------------------------------------------------------
 WORKER_NODE="gu-k8s-worker"
 GPU_OPERATOR_NS="gpu-operator"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
@@ -28,6 +31,7 @@ TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 MAX_RETRIES=15
 SLEEP_INTERVAL=20
 MIN_SUCCESS_ATTEMPT=2
+MAX_FAILED_ALLOWED=2   # Retry failed state up to 2 times
 
 # --------------------------------------------------------------
 # Logs setup
@@ -53,6 +57,7 @@ log "=============================================================="
 log "Checking MIG state for node ${WORKER_NODE}..."
 
 count=0
+FAILED_COUNT=0
 
 while true; do
     MIG_STATE=$(kubectl get node "${WORKER_NODE}" \
@@ -60,6 +65,7 @@ while true; do
     
     log "Current MIG state: '${MIG_STATE}' (Attempt: $count)"
 
+    # SUCCESS
     if [[ "${MIG_STATE}" == "success" ]]; then
         if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
             error "MIG state became SUCCESS too early (attempt $count)."
@@ -68,19 +74,32 @@ while true; do
         log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
         break
 
+    # FAILED (retry up to MAX_FAILED_ALLOWED)
     elif [[ "${MIG_STATE}" == "failed" ]]; then
-        error "Node ${WORKER_NODE} MIG configuration FAILED."
-        exit 1
+        FAILED_COUNT=$((FAILED_COUNT+1))
+        warn "MIG state reported FAILED (Failure count: ${FAILED_COUNT}/${MAX_FAILED_ALLOWED})"
 
+        if [[ $FAILED_COUNT -ge $MAX_FAILED_ALLOWED ]]; then
+            error "Node ${WORKER_NODE} MIG configuration FAILED after ${FAILED_COUNT} attempts."
+            exit 1
+        fi
+
+        log "Retrying... waiting ${SLEEP_INTERVAL}s before re-check."
+        sleep $SLEEP_INTERVAL
+        count=$((count+1))
+
+    # PENDING
     elif [[ "${MIG_STATE}" == "pending" ]]; then
         if [[ $count -ge $MAX_RETRIES ]]; then
             error "Timeout waiting for MIG state."
             exit 1
         fi
-        log "MIG state is PENDING, waiting ${SLEEP_INTERVAL}s..."
-        count=$((count+1))
-        sleep $SLEEP_INTERVAL
 
+        log "MIG state is PENDING, waiting ${SLEEP_INTERVAL}s..."
+        sleep $SLEEP_INTERVAL
+        count=$((count+1))
+
+    # Unexpected
     else
         error "Unexpected MIG state: '${MIG_STATE}'"
         exit 1
@@ -89,7 +108,9 @@ done
 
 log "MIG state validation completed successfully."
 
+# --------------------------------------------------------------
 # Locate MIG Manager Pod
+# --------------------------------------------------------------
 log "Locating MIG Manager pod..."
 MIG_MANAGER_POD=$(kubectl get pods -n ${GPU_OPERATOR_NS} -o wide \
     | grep mig-manager \
@@ -104,7 +125,9 @@ fi
 log "Executing nvidia-smi inside MIG Manager pod..."
 kubectl exec -n ${GPU_OPERATOR_NS} "${MIG_MANAGER_POD}" -- nvidia-smi
 
-# Generate CDI
+# --------------------------------------------------------------
+# Generate CDI specification
+# --------------------------------------------------------------
 log "Generating static CDI specification..."
 ssh "${WORKER_NODE}" \
     "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
@@ -114,6 +137,9 @@ log "Switching NVIDIA runtime mode to CDI..."
 ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"auto\"/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml"
 ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
 
+# --------------------------------------------------------------
+# Uncordon node
+# --------------------------------------------------------------
 log "Uncordoning node ${WORKER_NODE}..."
 kubectl uncordon "${WORKER_NODE}"
 
