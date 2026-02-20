@@ -1,17 +1,33 @@
 #!/bin/bash
 
-# ============================================================== 
+# ==============================================================
 # NVIDIA GPU Post-Configuration Utility
-# Target Node : gu-k8s-worker
-# Purpose     : Validate MIG, Generate CDI, Enable CDI Runtime
 # ==============================================================
 
 set -euo pipefail
 trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 
+# --------------------------------------------------------------
+# Global Lock (Prevents concurrent pre/post execution)
+# --------------------------------------------------------------
+LOCK_FILE="/var/lock/nvidia-mig-config.lock"
+exec 200>"$LOCK_FILE"
+
+if ! flock -n 200; then
+    echo "[ERROR] Another MIG configuration script is already running."
+    echo "Only one of pre.sh or post2.sh can run at a time."
+    exit 1
+fi
+
+echo $$ 1>&200
+
 WORKER_NODE="gu-k8s-worker"
 GPU_OPERATOR_NS="gpu-operator"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+
+MAX_RETRIES=15
+SLEEP_INTERVAL=20
+MIN_SUCCESS_ATTEMPT=2
 
 # --------------------------------------------------------------
 # Logs setup
@@ -32,34 +48,39 @@ log " Started At  : ${TIMESTAMP}"
 log "=============================================================="
 
 # --------------------------------------------------------------
-# Wait for MIG state to be SUCCESS or FAILED
+# Wait for MIG state
 # --------------------------------------------------------------
 log "Checking MIG state for node ${WORKER_NODE}..."
 
-MAX_RETRIES=15        # Maximum attempts (~5 minutes total)
-SLEEP_INTERVAL=20      # seconds
 count=0
 
 while true; do
     MIG_STATE=$(kubectl get node "${WORKER_NODE}" \
         -o jsonpath='{.metadata.labels.nvidia\.com/mig\.config\.state}' 2>/dev/null || echo "")
     
-    log "Current MIG state: '${MIG_STATE}'"
+    log "Current MIG state: '${MIG_STATE}' (Attempt: $count)"
 
     if [[ "${MIG_STATE}" == "success" ]]; then
+        if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
+            error "MIG state became SUCCESS too early (attempt $count)."
+            exit 1
+        fi
         log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
         break
+
     elif [[ "${MIG_STATE}" == "failed" ]]; then
         error "Node ${WORKER_NODE} MIG configuration FAILED."
         exit 1
+
     elif [[ "${MIG_STATE}" == "pending" ]]; then
         if [[ $count -ge $MAX_RETRIES ]]; then
-            error "Node ${WORKER_NODE} did not reach a final MIG state after $((MAX_RETRIES*SLEEP_INTERVAL)) seconds."
+            error "Timeout waiting for MIG state."
             exit 1
         fi
         log "MIG state is PENDING, waiting ${SLEEP_INTERVAL}s..."
         count=$((count+1))
         sleep $SLEEP_INTERVAL
+
     else
         error "Unexpected MIG state: '${MIG_STATE}'"
         exit 1
@@ -68,9 +89,7 @@ done
 
 log "MIG state validation completed successfully."
 
-# --------------------------------------------------------------
 # Locate MIG Manager Pod
-# --------------------------------------------------------------
 log "Locating MIG Manager pod..."
 MIG_MANAGER_POD=$(kubectl get pods -n ${GPU_OPERATOR_NS} -o wide \
     | grep mig-manager \
@@ -85,26 +104,16 @@ fi
 log "Executing nvidia-smi inside MIG Manager pod..."
 kubectl exec -n ${GPU_OPERATOR_NS} "${MIG_MANAGER_POD}" -- nvidia-smi
 
-# --------------------------------------------------------------
-# CDI Generation
-# --------------------------------------------------------------
+# Generate CDI
 log "Generating static CDI specification..."
-ssh "${WORKER_NODE}" "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+ssh "${WORKER_NODE}" \
+    "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
+    >> "$log_file" 2>&1
 
-log "Validating CDI specification file..."
-ssh "${WORKER_NODE}" "ls -lh /etc/cdi/nvidia.yaml"
-
-# --------------------------------------------------------------
-# Runtime Switch to CDI
-# --------------------------------------------------------------
 log "Switching NVIDIA runtime mode to CDI..."
 ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"auto\"/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml"
 ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
-log "Runtime successfully switched to CDI mode."
 
-# --------------------------------------------------------------
-# Node Uncordon
-# --------------------------------------------------------------
 log "Uncordoning node ${WORKER_NODE}..."
 kubectl uncordon "${WORKER_NODE}"
 
