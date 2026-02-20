@@ -15,7 +15,7 @@ exec 200>"$LOCK_FILE"
 
 if ! flock -n 200; then
     echo "[ERROR] Another MIG configuration script is already running."
-    echo "Only one of pre.sh or post2.sh can run at a time."
+    echo "Only one of pre.sh or post.sh can run at a time."
     exit 1
 fi
 
