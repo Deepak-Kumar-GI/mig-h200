@@ -1,85 +1,76 @@
 #!/bin/bash
 # ==============================================================
-# NVIDIA Runtime Mode Switch Utility (AUTO -> CDI)
+# NVIDIA Runtime Mode Switch Script
 # ==============================================================
 #
-# Purpose:
-#   Switch NVIDIA container runtime from AUTO mode to CDI mode
-#   after MIG configuration is completed.
+# PURPOSE
+# -------
+# Switch NVIDIA container runtime from AUTO → CDI.
 #
-# What this script does:
-#   1. Acquire exclusive lock
-#   2. Confirm no GPU workloads are running
-#   3. Backup NVIDIA runtime config
-#   4. Switch runtime to CDI
-#   5. Provide detailed log and summary
+# WHAT THIS SCRIPT DOES (STEP-BY-STEP)
+# ------------------------------------
+#   STEP 1  : Acquire global execution lock
+#   STEP 2  : Backup NVIDIA container runtime configuration
+#   STEP 3  : Detect current runtime mode
+#   STEP 4  : Switch runtime mode → CDI (if required)
+#   STEP 5  : Verify containerd service
 #
 # ==============================================================
 
 set -euo pipefail
 trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 
-# -------------------------
-# Source Shared Utilities
-# -------------------------
 source config.sh
-source lock.sh
-source cdi.sh
+source common/lock.sh
+source common/cdi.sh
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
-# -------------------------
-# Runtime Directories
-# -------------------------
 RUN_LOG_DIR="${BASE_LOG_DIR}/$(date +%Y%m%d-%H%M%S)"
 log_file="${RUN_LOG_DIR}/runtime-switch.log"
 mkdir -p "$RUN_LOG_DIR"
 
-# -------------------------
-# Logging Functions
-# -------------------------
-log()   { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
-warn()  { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
-error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
+log()  { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
+error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
-# -------------------------
-# Confirmation Before Proceeding
-# -------------------------
-confirm_no_workloads() {
-    echo
-    echo "⚠️  Ensure NO GPU workloads are running on ${WORKER_NODE}"
-    read -p "Proceed with runtime switch to CDI? (y/n): " answer
-    case "$answer" in
-        y|Y ) log "User confirmed no GPU workloads are running." ;;
-        * ) echo "Operation cancelled."; exit 1 ;;
-    esac
+verify_containerd() {
+    if ssh "$WORKER_NODE" "systemctl is-active --quiet containerd"; then
+        log "containerd is active."
+    else
+        error "containerd is NOT active."
+        exit 1
+    fi
 }
 
-# -------------------------
-# Main Execution
-# -------------------------
 main() {
-    # Acquire global lock
+
     acquire_lock "$LOCK_FILE"
-    log "Lock acquired on $LOCK_FILE"
 
-    confirm_no_workloads
-
-    # Banner
     log "=============================================================="
-    log " NVIDIA Runtime Mode Switch (AUTO -> CDI)"
+    log " NVIDIA Runtime Mode Switch (AUTO → CDI)"
     log " Node        : ${WORKER_NODE}"
     log " Started At  : $(date +"%Y-%m-%d %H:%M:%S")"
     log " Run Folder  : ${RUN_LOG_DIR}"
     log "=============================================================="
 
-    # Backup NVIDIA runtime config before switching
+    log "Backing up NVIDIA runtime configuration..."
     backup_runtime_config "$WORKER_NODE" "$RUN_LOG_DIR" "$log_file"
 
-    # Switch runtime mode to CDI
-    switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
+    log "Checking current NVIDIA runtime mode..."
+    current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
-    # Summary
+    if [[ "$current_mode" == "cdi" ]]; then
+        log "Runtime already in CDI mode. No change required."
+    else
+        log "Current Runtime Mode : ${current_mode}"
+        log "Target  Runtime Mode : cdi"
+        log "Switching runtime mode to CDI..."
+        switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
+        log "Runtime mode successfully changed to CDI."
+    fi
+
+    verify_containerd
+
     log "--------------------------------------------------------------"
     log " RUNTIME MODE SWITCH COMPLETED SUCCESSFULLY"
     log " Log File : ${log_file}"

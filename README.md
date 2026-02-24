@@ -36,25 +36,7 @@ kubectl get pods -A
 nano custom-mig-config.yaml
 ```
 
-### Step 7: Apply the configuration file
-
-```bash
-kubectl apply -f custom-mig-config.yaml
-```
-
-### Step 8: Apply the temporary label
-
-```bash
-kubectl label node gu-k8s-worker nvidia.com/mig.config=temp --overwrite
-```
-
-### Step 9: Apply the MIG configuration label
-
-```bash
-kubectl label node gu-k8s-worker nvidia.com/mig.config=custom-mig-config --overwrite
-```
-
-### Step 10: Execute the post script
+### Step 7: Execute the post script
 
 ```bash
 ./post.sh
@@ -96,6 +78,7 @@ cd /root/mig-partion/script
 
 ### `post.sh`
 
+* Apply configure
 * Check that the node label is successful
 * Verify the new MIG configuration
 * Generate CDI
@@ -105,6 +88,3 @@ cd /root/mig-partion/script
 ### `restart.sh`
 
 * Change mode from Auto to CDI
-
-
-
