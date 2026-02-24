@@ -32,19 +32,6 @@ warn() { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
 error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
 # -------------------------
-# Confirmation Before Proceeding
-# -------------------------
-confirm_no_workloads() {
-    echo
-    echo "⚠️  Ensure NO GPU workloads are running on ${WORKER_NODE}"
-    read -p "Proceed? (y/n): " answer
-    case "$answer" in
-        y|Y ) log "User confirmed no GPU workloads are running." ;;
-        * ) echo "Operation cancelled."; exit 1 ;;
-    esac
-}
-
-# -------------------------
 # Wait for MIG State
 # -------------------------
 wait_for_mig_state() {
@@ -119,8 +106,6 @@ main() {
 
     acquire_lock "$LOCK_FILE"
     log "Lock acquired on $LOCK_FILE"
-
-    confirm_no_workloads
 
     log "=============================================================="
     log " NVIDIA GPU Post-Configuration"
