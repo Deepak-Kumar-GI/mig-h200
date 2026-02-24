@@ -23,6 +23,7 @@ trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 source config.sh
 source common/lock.sh
 source common/cdi.sh
+source common/workload-check.sh
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
@@ -52,6 +53,8 @@ main() {
     log " Started At  : $(date +"%Y-%m-%d %H:%M:%S")"
     log " Run Folder  : ${RUN_LOG_DIR}"
     log "=============================================================="
+
+    check_gpu_workloads "$WORKER_NODE"
 
     log "Backing up NVIDIA runtime configuration..."
     backup_runtime_config "$WORKER_NODE" "$RUN_LOG_DIR" "$log_file"
