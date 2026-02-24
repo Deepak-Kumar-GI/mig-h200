@@ -1,15 +1,23 @@
 #!/bin/bash
 # ==============================================================
-# Lock Utility for NVIDIA Scripts
+# Global Lock Utility
 # ==============================================================
-# Usage: acquire_lock "/var/lock/lock-file-name.lock"
 
+# -------------------------
+# Acquire Lock
+# Usage: acquire_lock <LOCK_FILE>
+# -------------------------
 acquire_lock() {
     local lock_file="$1"
     exec 200>"$lock_file"
+
     if ! flock -n 200; then
-        echo "[ERROR] Another instance is already running (lock: $lock_file)."
+        echo "[ERROR] Another configuration script is already running."
+        echo "Only one of pre/post/restart scripts can run at a time."
         exit 1
     fi
+
+    # Store PID in lock file descriptor
     echo $$ 1>&200
+    log "Lock acquired on $lock_file"
 }
