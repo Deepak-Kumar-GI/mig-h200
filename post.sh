@@ -118,7 +118,7 @@ main() {
     run_nvidia_smi
 
     # Generate CDI spec
-    generate_cdi
+    generate_cdi "$WORKER_NODE" "$log_file"
 
     # Switch runtime to CDI
     switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
