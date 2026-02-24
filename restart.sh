@@ -2,12 +2,10 @@
 # ==============================================================
 # NVIDIA Runtime Mode Switch Utility (AUTO -> CDI)
 # ==============================================================
+
 set -euo pipefail
 trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 
-# -------------------------
-# Source Shared Utilities
-# -------------------------
 source lock.sh
 source cdi.sh
 
@@ -23,7 +21,7 @@ log_file="${RUN_LOG_DIR}/runtime-switch.log"
 
 mkdir -p "$RUN_LOG_DIR"
 
-log()   { echo "[$(date +"%H:%M:%S")] [INFO] $1" | tee -a "$log_file"; }
+log()   { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
 error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
 # -------------------------
@@ -40,7 +38,10 @@ main() {
     # Acquire lock
     acquire_lock "$LOCK_FILE"
 
-    # Switch runtime to CDI using shared function
+    # Backup runtime config before switching
+    backup_runtime_config "$WORKER_NODE" "$RUN_LOG_DIR" "$log_file"
+
+    # Switch runtime to CDI
     switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
 
     log "--------------------------------------------------------------"
