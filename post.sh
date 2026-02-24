@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==============================================================
-# NVIDIA GPU Post-Configuration (Full Logic)
+# NVIDIA GPU Post-Configuration
 # ==============================================================
+
 set -euo pipefail
 trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 
@@ -26,18 +27,16 @@ BACKUP_DIR="${RUN_LOG_DIR}/backup"
 log_file="${RUN_LOG_DIR}/post.log"
 
 mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
-log() { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
+
+log()  { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
 warn() { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
-error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
+error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
 # -------------------------
-# Backup runtime config
+# Backup Functions
 # -------------------------
-backup_runtime_config() {
-    log "Backing up NVIDIA container runtime config..."
-    scp "${WORKER_NODE}:/etc/nvidia-container-runtime/config.toml" \
-        "${BACKUP_DIR}/config.toml.bak.$(date +%s)" >> "$log_file" 2>&1 \
-        || { error "Failed to backup runtime config."; exit 1; }
+backup_mig_runtime() {
+    backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$log_file"
 }
 
 # -------------------------
@@ -49,33 +48,24 @@ wait_for_mig_state() {
     local failed_count=0
 
     while true; do
-        local mig_state
-        mig_state=$(kubectl get node "${WORKER_NODE}" \
+        local state
+        state=$(kubectl get node "$WORKER_NODE" \
             -o jsonpath='{.metadata.labels.nvidia\.com/mig\.config\.state}' 2>/dev/null || echo "")
 
-        log "Current MIG state: '${mig_state}' (Attempt: $count)"
+        log "Current MIG state: '${state}' (Attempt: $count)"
 
-        if [[ "${mig_state}" == "success" ]]; then
-            if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
-                error "MIG state became SUCCESS too early (attempt $count)."
-                exit 1
-            fi
-            log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
+        if [[ "$state" == "success" ]]; then
+            [[ $count -lt $MIN_SUCCESS_ATTEMPT ]] && { error "MIG success too early (attempt $count)"; exit 1; }
+            log "MIG state SUCCESS detected. Proceeding..."
             break
-        elif [[ "${mig_state}" == "failed" ]]; then
+        elif [[ "$state" == "failed" ]]; then
             failed_count=$((failed_count+1))
-            warn "MIG state reported FAILED (${failed_count}/${MAX_FAILED_ALLOWED})"
-            if [[ $failed_count -ge $MAX_FAILED_ALLOWED ]]; then
-                error "MIG configuration FAILED after ${failed_count} attempts."
-                exit 1
-            fi
-        elif [[ "${mig_state}" == "pending" ]]; then
-            if [[ $count -ge $MAX_RETRIES ]]; then
-                error "Timeout waiting for MIG state."
-                exit 1
-            fi
+            warn "MIG state FAILED (${failed_count}/${MAX_FAILED_ALLOWED})"
+            [[ $failed_count -ge $MAX_FAILED_ALLOWED ]] && { error "MIG configuration FAILED"; exit 1; }
+        elif [[ "$state" == "pending" ]]; then
+            [[ $count -ge $MAX_RETRIES ]] && { error "Timeout waiting for MIG"; exit 1; }
         else
-            error "Unexpected MIG state: '${mig_state}'."
+            error "Unexpected MIG state: '$state'"
             exit 1
         fi
 
@@ -90,26 +80,19 @@ wait_for_mig_state() {
 run_nvidia_smi() {
     log "Locating MIG Manager pod..."
     local pod
-    pod=$(kubectl get pods -n "${GPU_OPERATOR_NS}" -o wide \
-        | grep mig-manager \
-        | grep "${WORKER_NODE}" \
-        | awk '{print $1}')
+    pod=$(kubectl get pods -n "$GPU_OPERATOR_NS" -o wide | grep mig-manager | grep "$WORKER_NODE" | awk '{print $1}')
+    [[ -z "$pod" ]] && { error "MIG Manager pod not found"; exit 1; }
 
-    if [[ -z "$pod" ]]; then
-        error "MIG Manager pod not found."
-        exit 1
-    fi
-
-    log "Executing nvidia-smi inside MIG Manager pod..."
-    kubectl exec -n "${GPU_OPERATOR_NS}" "${pod}" -- nvidia-smi
+    log "Executing nvidia-smi in pod $pod..."
+    kubectl exec -n "$GPU_OPERATOR_NS" "$pod" -- nvidia-smi
 }
 
 # -------------------------
-# Generate CDI spec
+# Generate CDI
 # -------------------------
 generate_cdi() {
     log "Generating static CDI specification..."
-    ssh "${WORKER_NODE}" "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" >> "$log_file" 2>&1
+    ssh "$WORKER_NODE" "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" >> "$log_file" 2>&1
 }
 
 # -------------------------
@@ -117,6 +100,7 @@ generate_cdi() {
 # -------------------------
 main() {
     acquire_lock "$LOCK_FILE"
+
     log "=============================================================="
     log " NVIDIA GPU Post-Configuration"
     log " Node        : ${WORKER_NODE}"
@@ -124,16 +108,16 @@ main() {
     log " Run Folder  : ${RUN_LOG_DIR}"
     log "=============================================================="
 
-    # Backup runtime
-    backup_runtime_config
+    # Backup NVIDIA runtime
+    backup_mig_runtime
 
     # Wait for MIG state
     wait_for_mig_state
 
-    # Run nvidia-smi in pod
+    # Run nvidia-smi in MIG Manager pod
     run_nvidia_smi
 
-    # Generate CDI
+    # Generate CDI spec
     generate_cdi
 
     # Switch runtime to CDI
@@ -141,7 +125,7 @@ main() {
 
     # Uncordon node
     log "Uncordoning node ${WORKER_NODE}..."
-    kubectl uncordon "${WORKER_NODE}" >> "$log_file" 2>&1
+    kubectl uncordon "$WORKER_NODE" >> "$log_file" 2>&1
 
     log "--------------------------------------------------------------"
     log " POST-CONFIGURATION COMPLETED SUCCESSFULLY"
