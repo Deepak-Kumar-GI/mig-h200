@@ -22,21 +22,15 @@ cd /root/mig-partion/script
 ./pre.sh
 ```
 
-### Step 4: Check running user workloads (users generally run pods)
+### Step 4: Delete user pods/workloads if they exist
 
-```bash
-kubectl get pods -A
-```
-
-### Step 5: Delete user pods/workloads if they exist
-
-### Step 6: Open the MIG configuration file
+### Step 5: Open the MIG configuration file
 
 ```bash
 nano custom-mig-config.yaml
 ```
 
-### Step 7: Execute the post script
+### Step 6: Execute the post script
 
 ```bash
 ./post.sh
