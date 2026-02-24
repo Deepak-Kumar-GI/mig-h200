@@ -34,13 +34,15 @@ MIN_SUCCESS_ATTEMPT=2
 MAX_FAILED_ALLOWED=2
 
 # --------------------------------------------------------------
-# Logs Setup (Timestamped folder)
+# Logs & Backup Setup
 # --------------------------------------------------------------
 BASE_LOG_DIR="logs"
 TIMESTAMP_FOLDER=$(date +%Y%m%d-%H%M%S)
 RUN_LOG_DIR="${BASE_LOG_DIR}/${TIMESTAMP_FOLDER}"
+BACKUP_DIR="${RUN_LOG_DIR}/backup"
 
-mkdir -p "$RUN_LOG_DIR"
+mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
+
 log_file="${RUN_LOG_DIR}/post.log"
 
 log()   { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
@@ -55,6 +57,19 @@ log " Run Folder  : ${RUN_LOG_DIR}"
 log "=============================================================="
 
 # --------------------------------------------------------------
+# Backup NVIDIA Runtime Config (REMOTE → LOCAL)
+# --------------------------------------------------------------
+log "Backing up NVIDIA container runtime config from ${WORKER_NODE}..."
+
+RUNTIME_BACKUP_FILE="${BACKUP_DIR}/config.toml.bak.$(date +%s)"
+
+scp "${WORKER_NODE}:/etc/nvidia-container-runtime/config.toml" \
+    "${RUNTIME_BACKUP_FILE}" >> "$log_file" 2>&1 \
+    || { error "Failed to backup runtime config."; exit 1; }
+
+log "Runtime config backup stored at: ${RUNTIME_BACKUP_FILE}"
+
+# --------------------------------------------------------------
 # Wait for MIG state
 # --------------------------------------------------------------
 log "Checking MIG state for node ${WORKER_NODE}..."
@@ -65,36 +80,40 @@ FAILED_COUNT=0
 while true; do
     MIG_STATE=$(kubectl get node "${WORKER_NODE}" \
         -o jsonpath='{.metadata.labels.nvidia\.com/mig\.config\.state}' 2>/dev/null || echo "")
-    
+
     log "Current MIG state: '${MIG_STATE}' (Attempt: $count)"
 
     if [[ "${MIG_STATE}" == "success" ]]; then
         if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
-            error "MIG state became SUCCESS too early (attempt $count). Reapply the temp and config-mig labels."
+            error "MIG state became SUCCESS too early (attempt $count). Reapply labels."
             exit 1
         fi
         log "Node ${WORKER_NODE} MIG state is SUCCESS. Proceeding..."
         break
+
     elif [[ "${MIG_STATE}" == "failed" ]]; then
         FAILED_COUNT=$((FAILED_COUNT+1))
-        warn "MIG state reported FAILED (Failure count: ${FAILED_COUNT}/${MAX_FAILED_ALLOWED})"
+        warn "MIG state reported FAILED (${FAILED_COUNT}/${MAX_FAILED_ALLOWED})"
+
         if [[ $FAILED_COUNT -ge $MAX_FAILED_ALLOWED ]]; then
-            error "Node ${WORKER_NODE} MIG configuration FAILED after ${FAILED_COUNT} attempts. Reapply the temp and config-mig labels."
+            error "MIG configuration FAILED after ${FAILED_COUNT} attempts."
             exit 1
         fi
-        log "Retrying... waiting ${SLEEP_INTERVAL}s before re-check."
+
         sleep $SLEEP_INTERVAL
         count=$((count+1))
+
     elif [[ "${MIG_STATE}" == "pending" ]]; then
         if [[ $count -ge $MAX_RETRIES ]]; then
             error "Timeout waiting for MIG state."
             exit 1
         fi
-        log "MIG state is PENDING, waiting ${SLEEP_INTERVAL}s..."
+
         sleep $SLEEP_INTERVAL
         count=$((count+1))
+
     else
-        error "Unexpected MIG state: '${MIG_STATE}'. Reapply the temp and config-mig labels."
+        error "Unexpected MIG state: '${MIG_STATE}'."
         exit 1
     fi
 done
@@ -105,6 +124,7 @@ log "MIG state validation completed successfully."
 # Locate MIG Manager Pod
 # --------------------------------------------------------------
 log "Locating MIG Manager pod..."
+
 MIG_MANAGER_POD=$(kubectl get pods -n ${GPU_OPERATOR_NS} -o wide \
     | grep mig-manager \
     | grep "${WORKER_NODE}" \
@@ -126,17 +146,30 @@ ssh "${WORKER_NODE}" \
     "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
     >> "$log_file" 2>&1
 
+# --------------------------------------------------------------
+# Switch Runtime to CDI
+# --------------------------------------------------------------
 log "Switching NVIDIA runtime mode to CDI..."
-ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"auto\"/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml"
-ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
+
+ssh "${WORKER_NODE}" \
+    "sudo sed -i 's/mode = \"auto\"/mode = \"cdi\"/' \
+    /etc/nvidia-container-runtime/config.toml" \
+    >> "$log_file" 2>&1
+
+ssh "${WORKER_NODE}" \
+    "sudo systemctl restart containerd" \
+    >> "$log_file" 2>&1
+
+log "Runtime switched to CDI successfully."
 
 # --------------------------------------------------------------
 # Uncordon node
 # --------------------------------------------------------------
 log "Uncordoning node ${WORKER_NODE}..."
-kubectl uncordon "${WORKER_NODE}"
+kubectl uncordon "${WORKER_NODE}" >> "$log_file" 2>&1
 
 log "--------------------------------------------------------------"
 log " POST-CONFIGURATION COMPLETED SUCCESSFULLY"
-log " Log File : ${log_file}"
+log " Backup Location : ${BACKUP_DIR}"
+log " Log File        : ${log_file}"
 log "--------------------------------------------------------------"
