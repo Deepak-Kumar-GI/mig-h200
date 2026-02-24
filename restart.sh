@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================
-# NVIDIA CDI Generation & Runtime Switch Utility
+# NVIDIA Runtime Mode Switch Utility (AUTO -> CDI ONLY)
 # ==============================================================
 
 set -euo pipefail
@@ -34,21 +34,21 @@ TIMESTAMP_FOLDER=$(date +%Y%m%d-%H%M%S)
 RUN_LOG_DIR="${BASE_LOG_DIR}/${TIMESTAMP_FOLDER}"
 
 mkdir -p "$RUN_LOG_DIR"
-log_file="${RUN_LOG_DIR}/generate-cdi.log"
+log_file="${RUN_LOG_DIR}/runtime-switch.log"
 
 log()   { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
 warn()  { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
 error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
 log "=============================================================="
-log " NVIDIA CDI Generation & Runtime Configuration"
+log " NVIDIA Runtime Mode Switch (AUTO -> CDI)"
 log " Node        : ${WORKER_NODE}"
 log " Started At  : ${TIMESTAMP}"
 log " Run Folder  : ${RUN_LOG_DIR}"
 log "=============================================================="
 
 # --------------------------------------------------------------
-# Runtime Check Before CDI Generation
+# Runtime Check
 # --------------------------------------------------------------
 log "Checking NVIDIA runtime mode on ${WORKER_NODE}..."
 
@@ -69,41 +69,48 @@ log "Current runtime mode: ${CURRENT_MODE}"
 if [[ "${CURRENT_MODE}" == "cdi" ]]; then
     log "Runtime already set to CDI. No action required."
     log "--------------------------------------------------------------"
-    log " CDI CONFIGURATION SKIPPED (ALREADY IN CDI MODE)"
+    log " RUNTIME ALREADY IN CDI MODE"
     log "--------------------------------------------------------------"
     exit 0
 
 elif [[ "${CURRENT_MODE}" == "auto" ]]; then
-    log "Runtime is AUTO. Proceeding with CDI generation."
+    log "Runtime is AUTO. Proceeding with mode switch only."
 
-    # Verify nvidia-ctk exists
-    ssh "${WORKER_NODE}" \
-        "command -v nvidia-ctk >/dev/null 2>&1" \
-        || { error "nvidia-ctk not found on ${WORKER_NODE}"; exit 1; }
+    # ----------------------------------------------------------
+    # Backup config locally
+    # ----------------------------------------------------------
+    log "Creating local backup of config.toml..."
 
-    # Generate CDI specification
-    log "Generating static CDI specification..."
+    BACKUP_FILE="${RUN_LOG_DIR}/config.toml.bak.$(date +%s)"
+
+    scp "${WORKER_NODE}:/etc/nvidia-container-runtime/config.toml" \
+        "${BACKUP_FILE}" >> "$log_file" 2>&1 \
+        || { error "Backup failed."; exit 1; }
+
+    log "Backup stored at: ${BACKUP_FILE}"
+
+    # ----------------------------------------------------------
+    # Switch runtime mode to CDI
+    # ----------------------------------------------------------
+    log "Switching runtime mode to CDI..."
+
     ssh "${WORKER_NODE}" \
-        "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
+        "sudo sed -i 's/^mode = .*/mode = \"cdi\"/' \
+        /etc/nvidia-container-runtime/config.toml" \
         >> "$log_file" 2>&1
 
-    log "CDI specification generated."
-
-    # Backup config before modification
-    ssh "${WORKER_NODE}" \
-        "sudo cp /etc/nvidia-container-runtime/config.toml /etc/nvidia-container-runtime/config.toml.bak.$(date +%s)"
-
-    # Switch runtime mode to CDI
-    log "Switching runtime mode to CDI..."
-    ssh "${WORKER_NODE}" \
-        "sudo sed -i 's/^mode = .*/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml"
-
+    # ----------------------------------------------------------
     # Restart containerd
+    # ----------------------------------------------------------
     log "Restarting containerd..."
-    ssh "${WORKER_NODE}" \
-        "sudo systemctl restart containerd"
 
+    ssh "${WORKER_NODE}" \
+        "sudo systemctl restart containerd" \
+        >> "$log_file" 2>&1
+
+    # ----------------------------------------------------------
     # Validate restart
+    # ----------------------------------------------------------
     if ssh "${WORKER_NODE}" "systemctl is-active --quiet containerd"; then
         log "containerd restarted successfully."
     else
@@ -119,6 +126,6 @@ else
 fi
 
 log "--------------------------------------------------------------"
-log " CDI CONFIGURATION COMPLETED SUCCESSFULLY"
+log " RUNTIME MODE SWITCH COMPLETED SUCCESSFULLY"
 log " Log File : ${log_file}"
 log "--------------------------------------------------------------"
