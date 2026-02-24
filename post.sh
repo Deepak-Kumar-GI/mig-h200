@@ -49,7 +49,7 @@ wait_for_mig_state() {
 
         if [[ "$state" == "success" ]]; then
             if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
-                error "MIG success detected too early (attempt $count)"
+                error "MIG success detected too early (attempt $count). Reapply temp and custom-mig-config labels"
                 exit 1
             fi
             log "MIG state SUCCESS detected. Proceeding..."
@@ -60,7 +60,7 @@ wait_for_mig_state() {
             warn "MIG state FAILED (${failed_count}/${MAX_FAILED_ALLOWED})"
 
             if [[ $failed_count -ge $MAX_FAILED_ALLOWED ]]; then
-                error "MIG configuration FAILED"
+                error "MIG configuration FAILED. Check your mig configuration yaml-file and reapply temp and custom-mig-config labels"
                 exit 1
             fi
 
