@@ -93,3 +93,29 @@ switch_runtime_to_cdi() {
         exit 1
     fi
 }
+
+# -------------------------
+# Generate Static CDI Specification
+# Usage: generate_cdi <NODE> <LOG_FILE>
+# -------------------------
+generate_cdi() {
+    local node="${1:-$WORKER_NODE}"
+    local log_file="${2:-$log_file}"
+
+    log "Generating static CDI specification on $node..."
+
+    ssh "$node" "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
+        >> "$log_file" 2>&1 || {
+        error "Failed to generate CDI specification on $node"
+        exit 1
+    }
+
+    # Verify CDI file exists
+    ssh "$node" "test -f /etc/cdi/nvidia.yaml" \
+        >> "$log_file" 2>&1 || {
+        error "CDI file not found after generation!"
+        exit 1
+    }
+
+    log "CDI specification successfully generated and verified at /etc/cdi/nvidia.yaml"
+}
