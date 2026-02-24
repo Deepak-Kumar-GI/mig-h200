@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-mig-config
+  namespace: gpu-operator
+data:
+  config.yaml: |
+    version: v1
+    mig-configs:
+      custom-mig-config:
+        - devices: [0, 1]
+          mig-enabled: true
+          mig-devices:
+            "1g.18gb": 7
+        - devices: [2, 3, 4]
+          mig-enabled: true
+          mig-devices:
+            "2g.35gb": 3
+        - devices: [5, 6]
+          mig-enabled: true
+          mig-devices:
+            "3g.71gb": 2
+        - devices: [7]
+          mig-enabled: false
