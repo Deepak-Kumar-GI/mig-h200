@@ -54,7 +54,9 @@ log " Started At  : ${TIMESTAMP}"
 log " Run Folder  : ${RUN_LOG_DIR}"
 log "=============================================================="
 
-# Backup ClusterPolicy
+# --------------------------------------------------------------
+# Kubernetes Backups
+# --------------------------------------------------------------
 log "Backing up ClusterPolicy to ${BACKUP_DIR}..."
 kubectl get clusterpolicies.nvidia.com/cluster-policy -o yaml \
     > "${BACKUP_DIR}/cluster-policy.yaml"
@@ -77,6 +79,19 @@ kubectl get nodes -l nvidia.com/mig.config \
     -o=custom-columns=NODE:.metadata.name,MIG_CONFIG:.metadata.labels."nvidia\.com/mig\.config" \
     > "${BACKUP_DIR}/node-mig-labels.txt" || true
 
+# --------------------------------------------------------------
+# Backup NVIDIA Runtime Config (REMOTE FILE → LOCAL BACKUP_DIR)
+# --------------------------------------------------------------
+log "Backing up NVIDIA container runtime config from ${WORKER_NODE}..."
+
+RUNTIME_BACKUP_FILE="${BACKUP_DIR}/config.toml.bak.$(date +%s)"
+
+scp "${WORKER_NODE}:/etc/nvidia-container-runtime/config.toml" \
+    "${RUNTIME_BACKUP_FILE}" >> "$log_file" 2>&1 \
+    || { error "Failed to backup runtime config."; exit 1; }
+
+log "Runtime config backup stored at: ${RUNTIME_BACKUP_FILE}"
+
 log "Backup phase completed successfully."
 
 # --------------------------------------------------------------
@@ -96,8 +111,15 @@ fi
 
 if [[ "${CURRENT_MODE}" != "auto" ]]; then
     log "Switching runtime mode to AUTO..."
-    ssh "${WORKER_NODE}" "sudo sed -i 's/mode = \"cdi\"/mode = \"auto\"/' /etc/nvidia-container-runtime/config.toml"
-    ssh "${WORKER_NODE}" "sudo systemctl restart containerd"
+    ssh "${WORKER_NODE}" \
+        "sudo sed -i 's/mode = \"cdi\"/mode = \"auto\"/' \
+        /etc/nvidia-container-runtime/config.toml" \
+        >> "$log_file" 2>&1
+
+    ssh "${WORKER_NODE}" \
+        "sudo systemctl restart containerd" \
+        >> "$log_file" 2>&1
+
     log "Runtime successfully switched to AUTO."
 else
     log "Runtime already set to AUTO. No action required."
