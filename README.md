@@ -104,7 +104,6 @@ cd /root/mig-partion/script
 
 ### `restart.sh`
 
-* Generate CDI
 * Change mode from Auto to CDI
 
 
