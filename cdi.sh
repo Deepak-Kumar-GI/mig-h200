@@ -2,120 +2,99 @@
 # ==============================================================
 # NVIDIA CDI & Runtime Utility Functions
 # ==============================================================
+# Contains reusable runtime/CDI helper functions shared across
+# all scripts.
+# ==============================================================
+
 
 # -------------------------
-# Logging Functions (used by scripts)
+# Backup NVIDIA Runtime Config
 # -------------------------
-log()  { echo "[$(date +"%H:%M:%S")] [INFO]  $1"; }
-warn() { echo "[$(date +"%H:%M:%S")] [WARN]  $1"; }
-error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1"; }
-
-# -------------------------
-# Backup NVIDIA container runtime config
-# Usage: backup_runtime_config <NODE> <BACKUP_DIR> <LOG_FILE>
+# Creates a timestamped backup of:
+#   /etc/nvidia-container-runtime/config.toml
 # -------------------------
 backup_runtime_config() {
-    local node="${1:-$WORKER_NODE}"
-    local backup_dir="${2:-$BACKUP_DIR}"
-    local log_file="${3:-$log_file}"
+    local node="$1"
+    local backup_dir="$2"
+    local log_file="$3"
 
-    log "Backing up NVIDIA container runtime config from $node..."
+    # Verify file exists on remote node
+    ssh "$node" "sudo test -f /etc/nvidia-container-runtime/config.toml" || {
+        echo "[ERROR] Runtime config not found on $node"
+        exit 1
+    }
+
+    # Copy file to backup directory
     scp "${node}:/etc/nvidia-container-runtime/config.toml" \
         "${backup_dir}/config.toml.bak.$(date +%s)" >> "$log_file" 2>&1 \
-        || { error "Failed to backup runtime config from $node"; exit 1; }
-    log "Runtime config backup completed."
+        || {
+        echo "[ERROR] Failed to backup runtime config"
+        exit 1
+    }
 }
 
+
 # -------------------------
-# Switch NVIDIA runtime to AUTO
-# Usage: set_runtime_auto <NODE> <LOG_FILE>
+# Set Runtime Mode to AUTO
+# -------------------------
+# Updates runtime config and restarts containerd
 # -------------------------
 set_runtime_auto() {
-    local node="${1:-$WORKER_NODE}"
-    local log_file="${2:-$log_file}"
+    local node="$1"
+    local log_file="$2"
 
-    log "Checking NVIDIA runtime mode on $node..."
-    local current_mode
-    current_mode=$(ssh "$node" "grep '^mode' /etc/nvidia-container-runtime/config.toml | awk -F'\"' '{print \$2}'" || true)
+    ssh "$node" \
+        "sudo sed -i 's/^mode = .*/mode = \"auto\"/' /etc/nvidia-container-runtime/config.toml" \
+        >> "$log_file" 2>&1
 
-    if [[ -z "$current_mode" ]]; then
-        warn "Unable to determine current runtime mode."
-        return
-    fi
-    log "Current runtime mode: $current_mode"
-
-    if [[ "$current_mode" != "auto" ]]; then
-        log "Switching runtime mode to AUTO..."
-        ssh "$node" "sudo sed -i 's/^mode = .*/mode = \"auto\"/' /etc/nvidia-container-runtime/config.toml" >> "$log_file" 2>&1
-        ssh "$node" "sudo systemctl restart containerd" >> "$log_file" 2>&1
-        log "Runtime successfully switched to AUTO."
-    else
-        log "Runtime already set to AUTO. No action required."
-    fi
+    ssh "$node" "sudo systemctl restart containerd" >> "$log_file" 2>&1
 }
 
+
 # -------------------------
-# Switch NVIDIA runtime to CDI
-# Usage: switch_runtime_to_cdi <NODE> <LOG_FILE>
+# Switch Runtime Mode to CDI
+# -------------------------
+# Updates runtime config and verifies containerd restart
 # -------------------------
 switch_runtime_to_cdi() {
-    local node="${1:-$WORKER_NODE}"
-    local log_file="${2:-$log_file}"
+    local node="$1"
+    local log_file="$2"
 
-    log "Checking NVIDIA runtime mode on $node..."
-    local current_mode
-    current_mode=$(ssh "$node" "grep '^mode' /etc/nvidia-container-runtime/config.toml | awk -F'\"' '{print \$2}'" || true)
+    ssh "$node" \
+        "sudo sed -i 's/^mode = .*/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml" \
+        >> "$log_file" 2>&1
 
-    if [[ -z "$current_mode" ]]; then
-        error "Unable to determine current runtime mode."
+    ssh "$node" "sudo systemctl restart containerd" >> "$log_file" 2>&1
+
+    # Verify containerd is active
+    ssh "$node" "systemctl is-active --quiet containerd" || {
+        echo "[ERROR] containerd failed to restart"
         exit 1
-    fi
-    log "Current runtime mode: $current_mode"
-
-    if [[ "$current_mode" == "cdi" ]]; then
-        log "Runtime already in CDI mode. No action required."
-        return
-    elif [[ "$current_mode" == "auto" ]]; then
-        log "Switching runtime mode from AUTO to CDI..."
-        ssh "$node" "sudo sed -i 's/^mode = .*/mode = \"cdi\"/' /etc/nvidia-container-runtime/config.toml" >> "$log_file" 2>&1
-        ssh "$node" "sudo systemctl restart containerd" >> "$log_file" 2>&1
-
-        if ssh "$node" "systemctl is-active --quiet containerd"; then
-            log "containerd restarted successfully."
-        else
-            error "containerd failed to restart."
-            exit 1
-        fi
-
-        log "Runtime successfully switched to CDI."
-    else
-        error "Unsupported runtime mode: $current_mode. Expected 'auto' or 'cdi'."
-        exit 1
-    fi
+    }
 }
+
 
 # -------------------------
 # Generate Static CDI Specification
-# Usage: generate_cdi <NODE> <LOG_FILE>
+# -------------------------
+# Generates:
+#   /etc/cdi/nvidia.yaml
+# Then verifies file exists.
 # -------------------------
 generate_cdi() {
-    local node="${1:-$WORKER_NODE}"
-    local log_file="${2:-$log_file}"
+    local node="$1"
+    local log_file="$2"
 
-    log "Generating static CDI specification on $node..."
-
-    ssh "$node" "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
+    ssh "$node" \
+        "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" \
         >> "$log_file" 2>&1 || {
-        error "Failed to generate CDI specification on $node"
+        echo "[ERROR] Failed to generate CDI specification"
         exit 1
     }
 
-    # Verify CDI file exists
-    ssh "$node" "test -f /etc/cdi/nvidia.yaml" \
-        >> "$log_file" 2>&1 || {
-        error "CDI file not found after generation!"
+    # Verify CDI file was created
+    ssh "$node" "test -f /etc/cdi/nvidia.yaml" >> "$log_file" 2>&1 || {
+        echo "[ERROR] CDI file not found after generation"
         exit 1
     }
-
-    log "CDI specification successfully generated and verified at /etc/cdi/nvidia.yaml"
 }
