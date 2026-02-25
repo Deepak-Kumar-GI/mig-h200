@@ -57,8 +57,8 @@ wait_for_mig_state() {
 
     log "Checking MIG state for node ${WORKER_NODE}..."
 
-    local count=0
-    local failed_count=0
+    local count=1
+    local failed_count=1
 
     while true; do
 
