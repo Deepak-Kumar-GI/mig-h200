@@ -84,7 +84,7 @@ wait_for_mig_state() {
             warn "MIG state FAILED (${failed_count}/${MAX_FAILED_ALLOWED})"
 
             if [[ $failed_count -ge $MAX_FAILED_ALLOWED ]]; then
-                error "MIG configuration FAILED. Check your MIG config YAML and reapply labels."
+                error "MIG configuration FAILED. Check your MIG config YAML and again run the script post.sh"
                 exit 1
             fi
 
@@ -110,18 +110,24 @@ wait_for_mig_state() {
 # --------------------------------------------------------------
 apply_mig_with_retry() {
 
-    local attempt=0
+    local attempt=1
 
     while [[ $attempt -lt $MIG_MAX_APPLY_ATTEMPTS ]]; do
 
-        log "Applying custom MIG config (${MIG_CONFIG_FILE}) - Attempt $((attempt+1))"
+        log "Applying custom MIG config (${MIG_CONFIG_FILE}) - MIG Attempt $((attempt))"
         kubectl apply -f "$MIG_CONFIG_FILE" >> "$log_file" 2>&1
+
+        kubectl label node "$WORKER_NODE" nvidia.com/mig.config=temp --overwrite >> "$log_file" 2>&1
+        sleep "$TEMP_LABEL_SLEEP"
+
+        kubectl label node "$WORKER_NODE" nvidia.com/mig.config=custom-mig-config --overwrite >> "$log_file" 2>&1
+        sleep "$CUSTOM_LABEL_SLEEP"
 
         if wait_for_mig_state; then
             log "MIG successfully applied."
             return 0
         else
-            warn "Early success detected. Reapplying labels..."
+            warn "Applying labels..."
 
             kubectl label node "$WORKER_NODE" nvidia.com/mig.config=temp --overwrite >> "$log_file" 2>&1
             sleep "$TEMP_LABEL_SLEEP"
