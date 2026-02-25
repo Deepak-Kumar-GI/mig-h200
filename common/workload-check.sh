@@ -16,7 +16,7 @@ check_gpu_workloads() {
         echo "[ERROR] The following GPU workloads are still running:"
         echo "$pods"
         echo
-        echo "Please delete these workloads and re-run pre.sh"
+        echo "Please delete these workloads and re-run the script."
         exit 1
     else
         echo "[INFO] No GPU workloads running. Safe to proceed."
