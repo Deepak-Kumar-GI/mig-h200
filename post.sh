@@ -23,7 +23,7 @@
 # ==============================================================
 
 set -euo pipefail
-trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
+trap 'echo "[ERROR] Script failed at ${BASH_SOURCE}:${LINENO}"; exit 1' ERR
 
 # --------------------------------------------------------------
 # Load Shared Configuration & Utilities
