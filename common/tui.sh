@@ -11,7 +11,7 @@
 #                      Confirmation (yesno) --> proceed / back to hub
 #
 # The GPU hub uses whiptail exit codes to separate actions:
-#   rc=0   (OK / Configure button)  = user selected a GPU
+#   rc=0   (OK / Select button)     = user selected a GPU
 #   rc=1   (Cancel / Apply button)  = user wants to apply configuration
 #   rc=255 (ESC key)                = user wants to exit
 #
@@ -42,17 +42,12 @@ readonly MIN_TERM_LINES=24
 # capped so dialogs don't look stretched on very wide terminals.
 readonly MAX_DLG_WIDTH=78
 
-# Navigation hint for menu and yesno screens.
-# Key=Action format keeps each hint compact to fit on one line.
-#   Arrows  = navigate list items
-#   TAB     = switch between list area and buttons
-#   ENTER   = confirm the current selection or button
-#   ESC     = exit the tool entirely
+# Navigation hint for yesno/confirmation screens where ENTER confirms.
 readonly NAV_HINT="Arrows=Navigate  TAB=Switch  ENTER=Confirm  ESC=Exit"
 
-# Navigation hint for the profile picker menu.
-# Same as NAV_HINT but uses ENTER=Select to clarify the action.
-readonly NAV_HINT_PICKER="Arrows=Navigate  TAB=Switch  ENTER=Select  ESC=Exit"
+# Navigation hint for menu screens (GPU hub, profile picker) where
+# ENTER selects a list item rather than confirming an action.
+readonly NAV_HINT_MENU="Arrows=Navigate  TAB=Switch  ENTER=Select  ESC=Exit"
 
 # ============================================================================
 # GLOBAL STATE
@@ -213,12 +208,13 @@ show_welcome_screen() {
         "$dlg_h" "$dlg_w"
 }
 
-# Display the GPU selection hub. The menu contains ONLY GPU entries —
-# actions are handled via buttons (Configure = OK, Apply = Cancel)
-# and ESC (exit). This avoids mixing GPU items with action items.
+# Display the GPU selection hub. The menu lists GPU entries only.
+# ENTER or the Select button (OK, rc=0) opens the profile picker.
+# The Apply button (Cancel, rc=1) proceeds to the confirmation screen.
+# ESC (rc=255) offers an exit prompt.
 #
 # whiptail exit codes used:
-#   0   = OK button (Configure) — user selected a GPU to configure
+#   0   = OK button (Select) — user selected a GPU to configure
 #   1   = Cancel button (Apply) — user wants to apply and proceed
 #   255 = ESC key — user wants to exit
 #
@@ -260,9 +256,9 @@ show_main_menu() {
 
     _whiptail_capture \
         --title " MIG Configuration " \
-        --ok-button " Configure " \
+        --ok-button " Select " \
         --cancel-button " Apply " \
-        --menu "$NAV_HINT" \
+        --menu "$NAV_HINT_MENU" \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
@@ -324,7 +320,7 @@ show_profile_picker() {
         --ok-button " Select " \
         --cancel-button " Back " \
         --default-item "$current_selection" \
-        --menu "$NAV_HINT_PICKER" \
+        --menu "$NAV_HINT_MENU" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${menu_items[@]}"
 }
@@ -461,7 +457,7 @@ run_tui() {
     # Hub-and-spoke navigation loop.
     while true; do
 
-        # show_main_menu returns: 0=Configure, 1=Apply, 255=ESC.
+        # show_main_menu returns: 0=Select, 1=Apply, 255=ESC.
         # Use `|| rc=$?` instead of `|| true` to capture the actual
         # exit code. `|| true` would always set $? to 0 (the exit code
         # of `true`), masking the real return value from whiptail.
@@ -470,7 +466,7 @@ run_tui() {
 
         case $rc in
             0)
-                # OK button (Configure) — user selected a GPU.
+                # OK button (Select) — user selected a GPU.
                 # Extract GPU index from "GPU N" tag.
                 # ${TUI_RESULT#GPU } removes the "GPU " prefix, leaving just N.
                 local gpu_idx="${TUI_RESULT#GPU }"
