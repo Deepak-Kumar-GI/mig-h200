@@ -84,34 +84,33 @@ _whiptail_capture() {
     return $rc
 }
 
-# Export the NEWT_COLORS environment variable to apply a clean
-# cyan/white color theme with green highlights to all whiptail dialogs.
+# Export the NEWT_COLORS environment variable to apply a green-bordered
+# color theme to all whiptail dialogs.
 #
 # NEWT_COLORS is a newt library feature (whiptail's rendering backend).
 # Each entry sets foreground,background for a UI element.
+#
+# Theme: green borders/titles on black, white text, green active button.
+# Inactive buttons use cyan so the focused (green) button stands out.
 #
 # Side effects:
 #   - Sets the NEWT_COLORS environment variable
 setup_tui_colors() {
     # shellcheck disable=SC2155
-    # button    = inactive buttons (black text on cyan bg)
-    # actbutton = focused button (black text on GREEN bg -- clearly distinct)
-    # actlistbox/actcheckbox use cyan highlight; active button uses green
-    # so the focused button always stands out from list selections.
     export NEWT_COLORS='
         root=white,black
-        border=cyan,black
+        border=green,black
         window=white,black
         shadow=,black
-        title=cyan,black
+        title=green,black
         button=black,cyan
         actbutton=black,green
         checkbox=white,black
-        actcheckbox=black,cyan
+        actcheckbox=black,green
         listbox=white,black
-        actlistbox=black,cyan
+        actlistbox=black,green
         textbox=white,black
-        roottext=cyan,black
+        roottext=green,black
     '
 }
 
@@ -150,8 +149,8 @@ check_tui_deps() {
 # TUI SCREENS
 # ============================================================================
 
-# Display the welcome screen with GPU hardware information and navigation
-# instructions. Uses --yesno with Continue/Exit buttons.
+# Display the welcome screen with GPU hardware information.
+# Minimal layout modeled after BIOS system information panels.
 #
 # Returns:
 #   0 if user presses Continue, non-zero if user presses Exit/ESC
@@ -161,32 +160,24 @@ show_welcome_screen() {
 
     # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
     # (( )) for arithmetic comparison; conditional assignment.
-    (( dlg_h > 20 )) && dlg_h=20
-    (( dlg_w > 68 )) && dlg_w=68
+    (( dlg_h > 14 )) && dlg_h=14
+    (( dlg_w > 56 )) && dlg_w=56
 
     local body=""
-    body+="       NVIDIA MIG Partition Configuration\n"
     body+="\n"
-    body+="  Hardware Summary\n"
-    body+="  ================================================\n"
-    body+="   GPU Model   :  ${GPU_MODEL}\n"
-    body+="   GPU Memory  :  ${GPU_MEMORY}\n"
-    body+="   GPU Count   :  ${GPU_COUNT}\n"
-    body+="  ================================================\n"
+    body+="  Model    ${GPU_MODEL}\n"
+    body+="  Memory   ${GPU_MEMORY}\n"
+    body+="  GPUs     ${GPU_COUNT}\n"
     body+="\n"
-    body+="  This tool lets you select a MIG partition\n"
-    body+="  profile for each GPU, then automatically\n"
-    body+="  applies the configuration to the cluster.\n"
-    body+="\n"
-    body+="  Navigation:\n"
-    body+="    Arrow keys .... Move       TAB ....... Buttons\n"
-    body+="    SPACE ......... Select     ENTER ..... Confirm"
+    body+="  Configure MIG partitions for each GPU\n"
+    body+="  on this worker node."
 
     local formatted
+    # printf with %b interprets backslash escapes (\n) in the argument.
     formatted=$(printf "%b" "$body")
 
     whiptail \
-        --title " NVIDIA MIG Configuration Tool " \
+        --title " NVIDIA MIG Configuration " \
         --yes-button " Continue " \
         --no-button " Exit " \
         --yesno "$formatted" \
@@ -194,34 +185,34 @@ show_welcome_screen() {
 }
 
 # Display the main menu hub showing all GPUs and their current profile
-# selections. Provides APPLY and QUIT options at the bottom.
+# selections. APPLY and QUIT sit at the bottom of the same list.
 #
 # Returns:
 #   0 on selection (result stored in TUI_RESULT)
 #   non-zero on Cancel/ESC
 #
 # Side effects:
-#   - Sets TUI_RESULT to the selected menu tag (e.g., "GPU-0", "APPLY")
+#   - Sets TUI_RESULT to the selected menu tag (e.g., "GPU 0", "APPLY")
 show_main_menu() {
     local menu_items=()
     local i
 
     # Build menu items: one entry per GPU showing its current profile.
-    # printf pads the GPU index to keep the menu aligned.
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
         local profile_name="${PROFILE_NAMES[$profile_idx]}"
 
-        # Tag = "GPU-N", Description = profile name with arrow prefix
-        menu_items+=("GPU-${i}" "=> ${profile_name}")
+        # Tag = "GPU N" (space, not dash — reads as a label, not a code).
+        # Description = bare profile name, no decorations.
+        menu_items+=("GPU ${i}" "${profile_name}")
     done
 
     # Action items at the bottom of the menu.
-    # Tags must NOT start with "-" -- whiptail would parse them as CLI options.
-    menu_items+=("APPLY" "** Apply configuration to cluster **")
-    menu_items+=("QUIT" "   Exit without changes")
+    # Tags must NOT start with "-" — whiptail would parse them as CLI options.
+    menu_items+=("APPLY" "Apply configuration")
+    menu_items+=("QUIT" "Exit without changes")
 
-    # Calculate menu height: GPU_COUNT + 2 action items, capped at 16
+    # Calculate menu height: GPU_COUNT + 2 action items, capped at 16.
     local menu_height=$((GPU_COUNT + 2))
     (( menu_height > 16 )) && menu_height=16
 
@@ -231,25 +222,25 @@ show_main_menu() {
     local dlg_w=$((TERM_COLS - 10))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 70 )) && dlg_w=70
+    (( dlg_w > 60 )) && dlg_w=60
 
-    # Recalculate menu_height if dialog was clamped -- whiptail needs
+    # Recalculate menu_height if dialog was clamped — whiptail needs
     # the list area to fit inside the dialog (dialog - ~7 overhead rows).
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
     _whiptail_capture \
-        --title " MIG Configuration :: GPU Selection " \
+        --title " MIG Configuration -- GPU Selection " \
         --ok-button " Select " \
         --cancel-button " Exit " \
-        --menu "Select a GPU to change its profile, or APPLY to proceed." \
+        --menu "Choose a GPU to change its profile." \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
 
-# Display a radio list of all available MIG profiles for a specific GPU.
-# Shows the profile description alongside each name so the operator
-# knows what each profile provides.
+# Display a radio list of available MIG profiles for a specific GPU.
+# Profile names only — no descriptions. The name is the specification
+# (e.g., "2g.35gb x3" is self-documenting to a DGX operator).
 #
 # Arguments:
 #   $1 - gpu_idx: The GPU index (0-based) being configured
@@ -269,49 +260,43 @@ show_profile_picker() {
     for ((i = 0; i < PROFILE_COUNT; i++)); do
         local status="OFF"
 
-        # Pre-select the currently assigned profile
+        # Pre-select the currently assigned profile.
         if [[ $i -eq $current_selection ]]; then
             status="ON"
         fi
 
-        # Build a descriptive label: name + description
-        # Example: "1g.18gb x7  --  7 small slices, 18GB each"
-        local label="${PROFILE_NAMES[$i]}"
-        if [[ -n "${PROFILE_DESCS[$i]}" ]]; then
-            label+="  --  ${PROFILE_DESCS[$i]}"
-        fi
-
-        # Radio list items are: tag description status
-        # Tag = profile index (used as the return value)
-        radio_items+=("$i" "$label" "$status")
+        # Radio list items are: tag description status.
+        # Tag = profile index (used as the return value).
+        # Description = profile name only, no appended description.
+        radio_items+=("$i" "${PROFILE_NAMES[$i]}" "$status")
     done
 
-    # Calculate list height: one row per profile, capped at 14
+    # Calculate list height: one row per profile, capped at 14.
     local list_height=$PROFILE_COUNT
     (( list_height > 14 )) && list_height=14
 
     # Cap dialog dimensions to terminal size minus margin.
-    # 9 extra rows = title + border + prompt text + button row + padding.
-    local dlg_h=$((list_height + 9))
-    local dlg_w=$((TERM_COLS - 6))
+    # 8 extra rows = title + border + prompt text + button row + padding.
+    local dlg_h=$((list_height + 8))
+    local dlg_w=$((TERM_COLS - 10))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 78 )) && dlg_w=78
+    (( dlg_w > 60 )) && dlg_w=60
 
-    # Recalculate list_height if dialog was clamped
-    local max_list=$((dlg_h - 8))
+    # Recalculate list_height if dialog was clamped.
+    local max_list=$((dlg_h - 7))
     (( list_height > max_list )) && list_height=$max_list
 
     _whiptail_capture \
-        --title " GPU-${gpu_idx} :: Select MIG Profile " \
+        --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "SPACE = pick a profile    TAB = switch buttons    ENTER = confirm" \
+        --radiolist "Select a profile for GPU ${gpu_idx}." \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
 
-# Display a confirmation dialog showing the full GPU->profile assignment
+# Display a confirmation dialog showing the GPU-to-profile assignment
 # table before applying changes.
 #
 # Returns:
@@ -321,42 +306,36 @@ show_confirmation() {
     local summary=""
     local i
 
-    summary+="  GPU  | MIG Profile\n"
-    summary+="  =====+=============================================\n"
+    summary+="  The following profiles will be applied:\n"
+    summary+="\n"
 
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
         local profile_name="${PROFILE_NAMES[$profile_idx]}"
 
-        # printf pads the GPU number to align the table columns.
-        # %-5s = left-aligned, 5-character wide string field.
-        summary+="$(printf "  %-5s| %s" "$i" "$profile_name")\n"
+        # printf pads the GPU label to align the profile column.
+        # %-8s = left-aligned, 8-character wide string field.
+        summary+="$(printf "    %-8s %s" "GPU ${i}" "$profile_name")\n"
     done
 
-    summary+="  =====+=============================================\n"
     summary+="\n"
-    summary+="  This will:\n"
-    summary+="    1. Cordon the worker node\n"
-    summary+="    2. Apply MIG partition configuration\n"
-    summary+="    3. Generate CDI specification\n"
-    summary+="    4. Switch runtime to CDI mode\n"
-    summary+="    5. Uncordon the worker node\n"
-    summary+="\n"
-    summary+="  Proceed with applying this configuration?"
+    summary+="  The node will be cordoned, reconfigured,\n"
+    summary+="  and uncordoned automatically."
 
-    # printf with %b interprets backslash escapes in the argument
+    # printf with %b interprets backslash escapes in the argument.
     local formatted
     formatted=$(printf "%b" "$summary")
 
-    # Cap dialog dimensions to terminal size minus margin
-    local dlg_h=$((GPU_COUNT + 20))
+    # Cap dialog dimensions to terminal size minus margin.
+    # GPU_COUNT + 10 rows = GPU lines + header + summary sentence + borders.
+    local dlg_h=$((GPU_COUNT + 10))
     local dlg_w=$((TERM_COLS - 10))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 60 )) && dlg_w=60
+    (( dlg_w > 56 )) && dlg_w=56
 
     whiptail \
-        --title " Confirm MIG Configuration " \
+        --title " Confirm Configuration " \
         --yes-button " Apply " \
         --no-button " Back " \
         --yesno "$formatted" \
@@ -378,7 +357,7 @@ show_confirmation() {
 # Side effects:
 #   - Populates GPU_SELECTIONS[] with user choices
 run_tui() {
-    # Initialize all GPUs to profile 0 (typically "MIG Disabled")
+    # Initialize all GPUs to profile 0 (typically "MIG Disabled").
     local i
     for ((i = 0; i < GPU_COUNT; i++)); do
         GPU_SELECTIONS[$i]=0
@@ -386,19 +365,19 @@ run_tui() {
 
     setup_tui_colors
 
-    # Show welcome screen; exit if user cancels
+    # Show welcome screen; exit if user cancels.
     if ! show_welcome_screen; then
         return 1
     fi
 
-    # Hub-and-spoke navigation loop
+    # Hub-and-spoke navigation loop.
     while true; do
 
         if ! show_main_menu; then
-            # Cancel/ESC on main menu -> confirm exit
+            # Cancel/ESC on main menu -> confirm exit.
             if whiptail --title " Exit " \
                     --yes-button " Exit " --no-button " Back " \
-                    --yesno "\n  Exit without making changes?" 9 44; then
+                    --yesno "\n  Exit without making changes?" 8 42; then
                 return 1
             fi
             continue
@@ -407,31 +386,31 @@ run_tui() {
         local choice="$TUI_RESULT"
 
         case "$choice" in
-            GPU-*)
-                # Extract GPU index from "GPU-N" tag.
-                # ${choice#GPU-} removes the "GPU-" prefix, leaving just N.
-                local gpu_idx="${choice#GPU-}"
+            GPU\ *)
+                # Extract GPU index from "GPU N" tag.
+                # ${choice#GPU } removes the "GPU " prefix, leaving just N.
+                local gpu_idx="${choice#GPU }"
 
                 if show_profile_picker "$gpu_idx"; then
-                    # Validate that the selection is not empty
+                    # Validate that the selection is not empty.
                     if [[ -n "$TUI_RESULT" ]]; then
                         GPU_SELECTIONS[$gpu_idx]="$TUI_RESULT"
                     fi
                 fi
-                # Cancel on profile picker -> return to hub unchanged
+                # Cancel on profile picker -> return to hub unchanged.
                 ;;
 
             "APPLY")
                 if show_confirmation; then
                     return 0
                 fi
-                # User chose "Back" -> return to hub
+                # User chose "Back" -> return to hub.
                 ;;
 
             "QUIT")
                 if whiptail --title " Exit " \
                         --yes-button " Exit " --no-button " Back " \
-                        --yesno "\n  Exit without making changes?" 9 44; then
+                        --yesno "\n  Exit without making changes?" 8 42; then
                     return 1
                 fi
                 ;;
