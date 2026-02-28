@@ -342,6 +342,9 @@ show_confirmation() {
     summary+="  The following profiles will be applied:\n"
     summary+="\n"
 
+    local non_mig=0
+    local mig_instances=0
+
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
         local profile_name="${PROFILE_NAMES[$profile_idx]}"
@@ -349,11 +352,40 @@ show_confirmation() {
         # printf pads the GPU label to align the profile column.
         # %-8s = left-aligned, 8-character wide string field.
         summary+="$(printf "    %-8s %s" "GPU ${i}" "$profile_name")\n"
+
+        # Tally device counts for the summary block below.
+        if [[ "${PROFILE_MIG_ENABLED[$profile_idx]}" == "false" ]]; then
+            # Non-MIG GPU = one full device
+            (( non_mig += 1 ))
+        else
+            # Sum the instance counts from the comma-separated
+            # "type:count" pairs in PROFILE_MIG_DEVICES[].
+            local devices="${PROFILE_MIG_DEVICES[$profile_idx]}"
+            if [[ -n "$devices" ]]; then
+                local pair
+                # IFS=',' splits on commas so each pair is "type:count"
+                IFS=',' read -ra _dev_pairs <<< "$devices"
+                for pair in "${_dev_pairs[@]}"; do
+                    [[ -z "$pair" ]] && continue
+                    # ${pair#*:} removes everything before the first colon
+                    # (keeps the count portion)
+                    (( mig_instances += ${pair#*:} ))
+                done
+            fi
+        fi
     done
 
+    local total_devices=$(( non_mig + mig_instances ))
+
     summary+="\n"
-    summary+="  The node will be cordoned, reconfigured,\n"
-    summary+="  and uncordoned automatically.\n"
+    summary+="  Device Summary:\n"
+    # printf %-18s aligns the labels, %3d right-aligns the counts.
+    summary+="$(printf "    %-18s : %3d" "Non-MIG devices" "$non_mig")\n"
+    summary+="$(printf "    %-18s : %3d" "MIG devices" "$mig_instances")\n"
+    summary+="$(printf "    %-18s : %3d" "Total devices" "$total_devices")\n"
+
+    summary+="\n"
+    summary+="  The node will be cordoned, reconfigured, and uncordoned automatically.\n"
     summary+="\n"
     summary+="  ${NAV_HINT}"
 
@@ -362,8 +394,9 @@ show_confirmation() {
     formatted=$(printf "%b" "$summary")
 
     # Cap dialog dimensions to terminal size minus margin.
-    # GPU_COUNT + 12 rows = GPU lines + header + summary + hint + borders.
-    local dlg_h=$((GPU_COUNT + 12))
+    # GPU_COUNT + 17 rows = GPU lines + header + device summary (5 lines)
+    # + hint + borders.
+    local dlg_h=$((GPU_COUNT + 17))
     local dlg_w=$((TERM_COLS - 8))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
