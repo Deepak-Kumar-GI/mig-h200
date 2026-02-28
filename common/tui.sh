@@ -35,6 +35,11 @@ readonly MIN_TERM_LINES=20
 # declare -a creates an indexed array.
 declare -a GPU_SELECTIONS
 
+# Actual terminal dimensions, set by check_tui_deps().
+# Used to size every dialog so it never exceeds the terminal.
+TERM_COLS=80
+TERM_LINES=24
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -89,14 +94,13 @@ check_tui_deps() {
         return 1
     fi
 
-    local cols lines
-
     # tput cols/lines queries the terminal dimensions from the terminfo database.
-    cols=$(tput cols 2>/dev/null || echo 0)
-    lines=$(tput lines 2>/dev/null || echo 0)
+    # Store in globals so all dialog functions can size themselves dynamically.
+    TERM_COLS=$(tput cols 2>/dev/null || echo 0)
+    TERM_LINES=$(tput lines 2>/dev/null || echo 0)
 
-    if [[ $cols -lt $MIN_TERM_COLS || $lines -lt $MIN_TERM_LINES ]]; then
-        echo "[ERROR] Terminal too small: ${cols}x${lines} (need ${MIN_TERM_COLS}x${MIN_TERM_LINES})." >&2
+    if [[ $TERM_COLS -lt $MIN_TERM_COLS || $TERM_LINES -lt $MIN_TERM_LINES ]]; then
+        echo "[ERROR] Terminal too small: ${TERM_COLS}x${TERM_LINES} (need ${MIN_TERM_COLS}x${MIN_TERM_LINES})." >&2
         return 1
     fi
 
@@ -105,25 +109,34 @@ check_tui_deps() {
 
 # Display the welcome screen with GPU hardware information.
 # Shows GPU model, memory, and count from the parsed template.
+# Dialog dimensions are capped to fit the current terminal.
 #
 # Returns:
 #   0 if user presses OK, non-zero if user presses ESC/Cancel
 show_welcome_screen() {
+    # Cap dialog to terminal size minus a 2-line/4-col margin so whiptail
+    # never tries to draw outside the terminal (which causes it to fail).
+    local dlg_h=$((TERM_LINES - 2))
+    local dlg_w=$((TERM_COLS - 4))
+
+    # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
+    # (( )) for arithmetic comparison; conditional assignment.
+    (( dlg_h > 14 )) && dlg_h=14
+    (( dlg_w > 58 )) && dlg_w=58
+
     whiptail \
         --title "NVIDIA MIG Configuration Tool" \
-        --msgbox "\
- Welcome to the MIG Configuration Tool
+        --msgbox "Welcome to the MIG Configuration Tool
 
- GPU Model  : ${GPU_MODEL}
- GPU Memory : ${GPU_MEMORY}
- GPU Count  : ${GPU_COUNT}
+GPU Model  : ${GPU_MODEL}
+GPU Memory : ${GPU_MEMORY}
+GPU Count  : ${GPU_COUNT}
 
- This tool lets you select a MIG partition profile
- for each GPU, then applies the configuration
- automatically (pre-phase + post-phase).
+Select a MIG profile for each GPU, then
+apply to run the full workflow automatically.
 
- Press OK to continue." \
-        18 58
+Press OK to continue." \
+        "$dlg_h" "$dlg_w"
 }
 
 # Display the main menu hub showing all GPUs and their current profile
@@ -146,16 +159,27 @@ show_main_menu() {
         menu_items+=("GPU-${i}" "${profile_name}")
     done
 
-    # Separator and action items
-    menu_items+=("---" "────────────────────────────────")
+    # Separator and action items (ASCII-safe dash line for portability)
+    menu_items+=("---" "--------------------------------")
     menu_items+=("APPLY" ">> Apply configuration to cluster")
     menu_items+=("QUIT" ">> Exit without changes")
 
     # Calculate menu height: GPU_COUNT + 3 action items, capped at 16
     local menu_height=$((GPU_COUNT + 3))
-    if [[ $menu_height -gt 16 ]]; then
-        menu_height=16
-    fi
+    (( menu_height > 16 )) && menu_height=16
+
+    # Cap dialog dimensions to terminal size minus margin.
+    # 8 extra rows = title + border + prompt text + button row + padding.
+    local dlg_h=$((menu_height + 8))
+    local dlg_w=$((TERM_COLS - 4))
+
+    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
+    (( dlg_w > 64 )) && dlg_w=64
+
+    # Recalculate menu_height if dialog was clamped — whiptail needs
+    # the list area to fit inside the dialog (dialog - ~7 overhead rows).
+    local max_list=$((dlg_h - 7))
+    (( menu_height > max_list )) && menu_height=$max_list
 
     # whiptail --menu presents a scrollable list of tagged items.
     # 3>&1 1>&2 2>&3 swaps stdout and stderr so whiptail's selection
@@ -166,8 +190,8 @@ show_main_menu() {
     #   2>&3 = redirect stderr to original stdout (captures whiptail's output)
     whiptail \
         --title "MIG Configuration - GPU Selection" \
-        --menu "\nSelect a GPU to change its profile, or APPLY to proceed:\n" \
-        $((menu_height + 8)) 64 "$menu_height" \
+        --menu "Select a GPU to change its profile, or APPLY:" \
+        "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}" \
         3>&1 1>&2 2>&3
 }
@@ -200,22 +224,32 @@ show_profile_picker() {
 
         # Radio list items are: tag description status
         # Tag = profile index (used as the return value)
-        # Description = "name — description" for clear display
-        radio_items+=("$i" "${PROFILE_NAMES[$i]} — ${PROFILE_DESCS[$i]}" "$status")
+        # Description = profile name (whiptail truncates if it overflows)
+        radio_items+=("$i" "${PROFILE_NAMES[$i]}" "$status")
     done
 
     # Calculate list height: one row per profile, capped at 14
     local list_height=$PROFILE_COUNT
-    if [[ $list_height -gt 14 ]]; then
-        list_height=14
-    fi
+    (( list_height > 14 )) && list_height=14
+
+    # Cap dialog dimensions to terminal size minus margin.
+    # 9 extra rows = title + border + prompt text (3 lines) + button row + padding.
+    local dlg_h=$((list_height + 9))
+    local dlg_w=$((TERM_COLS - 4))
+
+    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
+    (( dlg_w > 64 )) && dlg_w=64
+
+    # Recalculate list_height if dialog was clamped
+    local max_list=$((dlg_h - 8))
+    (( list_height > max_list )) && list_height=$max_list
 
     # whiptail --radiolist shows a single-select list with ON/OFF toggles.
     # Items are: tag description status (repeated for each item).
     whiptail \
         --title "Select MIG Profile for GPU-${gpu_idx}" \
-        --radiolist "\nChoose a partition profile for GPU-${gpu_idx}:\n(Use SPACE to select, ENTER to confirm)\n" \
-        $((list_height + 9)) 74 "$list_height" \
+        --radiolist "SPACE to select, ENTER to confirm:" \
+        "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}" \
         3>&1 1>&2 2>&3
 }
@@ -230,9 +264,9 @@ show_confirmation() {
     local summary=""
     local i
 
-    summary+="Review the MIG configuration before applying:\n\n"
-    summary+="  GPU  │ Profile\n"
-    summary+="  ─────┼─────────────────────────────────────\n"
+    summary+="Review the MIG configuration:\n\n"
+    summary+="  GPU | Profile\n"
+    summary+="  ----+-------------------------------\n"
 
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
@@ -240,24 +274,30 @@ show_confirmation() {
 
         # printf pads the GPU number to align the table columns.
         # %-4s = left-aligned, 4-character wide string field.
-        summary+="$(printf "  %-4s │ %s" "$i" "$profile_name")\n"
+        summary+="$(printf "  %-4s| %s" "$i" "$profile_name")\n"
     done
 
-    summary+="\nThis will cordon the node, apply MIG partitions,\n"
-    summary+="generate CDI specs, and uncordon when complete.\n\n"
+    summary+="\nThis will cordon the node, apply MIG\n"
+    summary+="partitions, generate CDI, and uncordon.\n\n"
     summary+="Proceed?"
+
+    # printf with %b interprets backslash escapes in the argument
+    local formatted
+    formatted=$(printf "%b" "$summary")
+
+    # Cap dialog dimensions to terminal size minus margin
+    local dlg_h=$((GPU_COUNT + 14))
+    local dlg_w=$((TERM_COLS - 4))
+
+    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
+    (( dlg_w > 54 )) && dlg_w=54
 
     # whiptail --yesno shows a Yes/No dialog.
     # --yes-button/--no-button customize the button labels.
-    # printf -v expands the \n escapes into actual newlines.
-    local formatted
-    # printf with %b interprets backslash escapes in the argument
-    formatted=$(printf "%b" "$summary")
-
     whiptail \
         --title "Confirm MIG Configuration" \
         --yesno "$formatted" \
-        $((GPU_COUNT + 16)) 58 \
+        "$dlg_h" "$dlg_w" \
         --yes-button "Apply" \
         --no-button "Back"
 }
