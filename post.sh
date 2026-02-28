@@ -1,68 +1,118 @@
 #!/bin/bash
-# ==============================================================
+# ============================================================================
 # NVIDIA GPU Post-Configuration Script
-# ==============================================================
+# ============================================================================
+# Applies the MIG partition configuration to the worker node and completes
+# post-reprovisioning setup (CDI generation, runtime switch, uncordon).
+# Run this script AFTER pre.sh has cordoned the node and switched the
+# runtime to AUTO mode, and after the operator has edited the MIG
+# ConfigMap and deleted DGX workloads.
 #
-# PURPOSE
-# -------
-# Complete worker node configuration after MIG reprovisioning.
+# Workflow (executed in order):
+#   1. Acquire global execution lock
+#   2. Apply custom MIG configuration YAML (with retry + label cycling)
+#   3. Wait for MIG state to reach SUCCESS (early-success protection)
+#   4. Validate GPU state via nvidia-smi inside the MIG Manager pod
+#   5. Generate CDI specification on the worker node
+#   6. Detect current runtime mode; switch to CDI if needed
+#   7. Verify containerd is running
+#   8. Uncordon the worker node
 #
-# WHAT THIS SCRIPT DOES (STEP-BY-STEP)
-# ------------------------------------
-#   STEP 1  : Acquire global execution lock
-#   STEP 2  : Apply custom MIG configuration YAML
-#   STEP 3  : Wait for MIG state to reach SUCCESS
-#             (with early-success protection & failure handling)
-#   STEP 4  : Validate GPU state inside MIG Manager pod
-#   STEP 5  : Generate CDI specification
-#   STEP 6  : Detect current runtime mode
-#   STEP 7  : Switch NVIDIA runtime mode → CDI (if required)
-#   STEP 8  : Verify containerd service
-#   STEP 9  : Uncordon worker node
+# Dependencies:
+#   - config.sh        (global settings)
+#   - common/lock.sh   (flock-based mutual exclusion)
+#   - common/cdi.sh    (runtime mode and CDI generation utilities)
 #
-# ==============================================================
+# Author: GRIL Team <support.ai@giindia.com>
+# Organization: Global Infoventures
+# Date: 2026-02-26
+# ============================================================================
 
+# ============================================================================
+# SHELL OPTIONS & ERROR HANDLING
+# ============================================================================
+
+# set -e  = exit immediately on any command failure
+# set -u  = treat unset variables as errors
+# set -o pipefail = a pipeline fails if ANY command in it fails (not just the last)
 set -euo pipefail
+
+# trap ... ERR fires on any command that exits non-zero.
+# ${BASH_SOURCE} = the filename of the currently executing script
+# ${LINENO}      = the line number where the error occurred
 trap 'echo "[ERROR] Script failed at ${BASH_SOURCE}:${LINENO}"; exit 1' ERR
 
-# --------------------------------------------------------------
-# Load Shared Configuration & Utilities
-# --------------------------------------------------------------
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
 source config.sh
 source common/lock.sh
 source common/cdi.sh
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
-# --------------------------------------------------------------
-# Runtime Directories
-# --------------------------------------------------------------
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
 RUN_LOG_DIR="${BASE_LOG_DIR}/$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${RUN_LOG_DIR}/backup"
 log_file="${RUN_LOG_DIR}/post.log"
 
 mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
 
-# --------------------------------------------------------------
-# Logging Functions
-# --------------------------------------------------------------
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+# Log an INFO-level message to both the console and the log file.
+# tee -a = append to file while also printing to stdout
+#          (-a = append, without it tee would overwrite)
 log()  { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
+
+# Log a WARN-level message to both the console and the log file.
 warn() { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
+
+# Log an ERROR-level message to both the console and the log file.
 error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
-# --------------------------------------------------------------
-# Wait for MIG State (ORIGINAL ROBUST VERSION RESTORED)
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+# Poll the MIG configuration state label on the worker node until it
+# reaches "success", or bail out on repeated failures / timeout.
+#
+# The MIG Manager sets the node label nvidia.com/mig.config.state to
+# one of: "pending", "success", or "failed". This function polls that
+# label at SLEEP_INTERVAL intervals.
+#
+# Early-success protection: If "success" appears before MIN_SUCCESS_ATTEMPT,
+# it is rejected. This guards against stale labels left over from a previous
+# configuration — the MIG Manager may not have started processing yet, so
+# the label still reads "success" from the prior run.
+#
+# Returns:
+#   0 - MIG state reached "success" after MIN_SUCCESS_ATTEMPT polls
+#   1 - "success" detected too early (caller should retry with label cycling)
+#
+# Side effects:
+#   - Exits the script (exit 1) if failures exceed MAX_FAILED_ALLOWED
+#   - Exits the script (exit 1) on timeout (MAX_RETRIES reached while pending)
+#   - Exits the script (exit 1) on unexpected state values
 wait_for_mig_state() {
 
     log "Checking MIG state for node ${WORKER_NODE}..."
 
     local count=1
-    local failed_count=1
+    local failed_count=0
 
     while true; do
 
         local state
+        # -o jsonpath extracts a single value from the Kubernetes resource JSON.
+        # The backslash-escaped dots (nvidia\.com) are literal dots in the label key.
+        # 2>/dev/null suppresses kubectl connection warnings.
+        # || echo "" provides an empty fallback so set -e does not abort on failure.
         state=$(kubectl get node "$WORKER_NODE" \
             -o jsonpath='{.metadata.labels.nvidia\.com/mig\.config\.state}' 2>/dev/null || echo "")
 
@@ -70,9 +120,12 @@ wait_for_mig_state() {
 
         if [[ "$state" == "success" ]]; then
 
+            # Early-success protection: reject success before enough polls
+            # to ensure the MIG Manager has actually re-evaluated the config
+            # (not just reporting the stale state from the previous run).
             if [[ $count -lt $MIN_SUCCESS_ATTEMPT ]]; then
                 error "MIG success detected too early (attempt $count)"
-                return 1   # trigger retry logic
+                return 1   # trigger retry logic in the caller
             fi
 
             log "MIG state SUCCESS detected. Proceeding..."
@@ -80,6 +133,7 @@ wait_for_mig_state() {
 
         elif [[ "$state" == "failed" ]]; then
 
+            # (( )) for arithmetic evaluation
             failed_count=$((failed_count+1))
             warn "MIG state FAILED (${failed_count}/${MAX_FAILED_ALLOWED})"
 
@@ -105,9 +159,27 @@ wait_for_mig_state() {
     done
 }
 
-# --------------------------------------------------------------
-# Apply MIG Configuration with Retry
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+# Apply the MIG configuration ConfigMap and trigger the MIG Manager by
+# cycling node labels. Retries up to MIG_MAX_APPLY_ATTEMPTS times.
+#
+# Label cycling strategy: The MIG Manager watches the nvidia.com/mig.config
+# label for changes. Simply re-applying the same label value does not trigger
+# re-evaluation. To force the Manager to re-process, we set a temporary value
+# ("temp") then switch back to "custom-mig-config". The sleep between labels
+# gives the Manager time to detect each transition.
+#
+# On failure (early-success or timeout), the function re-cycles labels to
+# force another MIG Manager evaluation before the next attempt.
+#
+# Returns:
+#   0 on success
+#
+# Side effects:
+#   - Applies the MIG ConfigMap to the cluster
+#   - Modifies nvidia.com/mig.config node label
+#   - Exits the script (exit 1) after MIG_MAX_APPLY_ATTEMPTS failures
 apply_mig_with_retry() {
 
     local attempt=1
@@ -115,8 +187,10 @@ apply_mig_with_retry() {
     while [[ $attempt -lt $MIG_MAX_APPLY_ATTEMPTS ]]; do
 
         log "Applying custom MIG config (${MIG_CONFIG_FILE}) - MIG Attempt $((attempt))"
+        # -f = read resource definition from file
         kubectl apply -f "$MIG_CONFIG_FILE" >> "$log_file" 2>&1
 
+        # --overwrite = replace the label value even if it already exists
         kubectl label node "$WORKER_NODE" nvidia.com/mig.config=temp --overwrite >> "$log_file" 2>&1
         sleep "$TEMP_LABEL_SLEEP"
 
@@ -127,7 +201,8 @@ apply_mig_with_retry() {
             log "MIG successfully applied."
             return 0
         else
-            warn "Applying labels..."
+            # Re-cycle labels to force the MIG Manager to re-evaluate
+            warn "Retrying — cycling labels to trigger MIG Manager re-evaluation..."
 
             kubectl label node "$WORKER_NODE" nvidia.com/mig.config=temp --overwrite >> "$log_file" 2>&1
             sleep "$TEMP_LABEL_SLEEP"
@@ -143,33 +218,50 @@ apply_mig_with_retry() {
     exit 1
 }
 
-# --------------------------------------------------------------
-# Run nvidia-smi in MIG Manager Pod
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+# Locate the MIG Manager pod on the worker node and run nvidia-smi inside it
+# to validate that GPUs are partitioned correctly.
+#
+# Side effects:
+#   - Prints nvidia-smi output to stdout
+#   - Exits the script (exit 1) if the MIG Manager pod is not found
 run_nvidia_smi() {
 
     log "Locating MIG Manager pod..."
 
     local pod
+    # -o wide = include extra columns (including the NODE column) so we can
+    #           filter by the target worker node.
+    # Pipeline: list all pods → filter to mig-manager → filter to our node → extract pod name
     pod=$(kubectl get pods -n "$GPU_OPERATOR_NAMESPACE" -o wide \
         | grep mig-manager | grep "$WORKER_NODE" | awk '{print $1}')
 
+    # -z = true if string is empty (pod not found)
     if [[ -z "$pod" ]]; then
         error "MIG Manager pod not found."
         exit 1
     fi
 
     log "Executing nvidia-smi inside pod ${pod}..."
+    # kubectl exec -- nvidia-smi runs nvidia-smi inside the container.
+    # The "--" separates kubectl flags from the command to execute.
     kubectl exec -n "$GPU_OPERATOR_NAMESPACE" "$pod" -- nvidia-smi
 }
 
-# --------------------------------------------------------------
-# Verify containerd Service
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+# Verify that the containerd service is running on the worker node.
+# containerd must be active for Kubernetes to schedule pods after uncordoning.
+#
+# Side effects:
+#   - Exits the script (exit 1) if containerd is not active
 verify_containerd() {
 
     log "Verifying containerd service status..."
 
+    # systemctl is-active checks whether a systemd unit is running.
+    # --quiet suppresses output; only the exit code is used (0 = active).
     if ssh "$WORKER_NODE" "systemctl is-active --quiet containerd"; then
         log "containerd is active."
     else
@@ -178,12 +270,13 @@ verify_containerd() {
     fi
 }
 
-# --------------------------------------------------------------
-# Main Execution
-# --------------------------------------------------------------
+# ============================================================================
+# MAIN LOGIC
+# ============================================================================
+
 main() {
 
-    # STEP 1
+    # Step 1: Acquire global lock to prevent concurrent MIG/CDI operations
     acquire_lock "$LOCK_FILE"
 
     log "=============================================================="
@@ -193,17 +286,17 @@ main() {
     log " Run Folder  : ${RUN_LOG_DIR}"
     log "=============================================================="
 
-    # STEP 2
+    # Step 2: Apply MIG configuration with retry and label cycling
     apply_mig_with_retry
 
-    # STEP 3
+    # Step 3: Validate GPU partition state via nvidia-smi
     run_nvidia_smi
 
-    # STEP 4
+    # Step 4: Generate CDI specification on the worker node
     log "Generating CDI specification..."
     generate_cdi "$WORKER_NODE" "$log_file"
 
-    # STEP 5 - Runtime Mode Detection
+    # Step 5: Detect current runtime mode and switch to CDI if needed
     log "Checking current NVIDIA runtime mode..."
     current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
@@ -217,17 +310,17 @@ main() {
         log "Runtime mode successfully changed to CDI."
     fi
 
-    # STEP 6
+    # Step 6: Verify containerd is running before uncordoning
     verify_containerd
 
-    # STEP 7
+    # Step 7: Uncordon the worker node to allow pod scheduling
     log "Uncordoning node ${WORKER_NODE}..."
     kubectl uncordon "$WORKER_NODE" >> "$log_file" 2>&1
 
-    log "--------------------------------------------------------------"
+    log "=============================================================="
     log " POST-CONFIGURATION COMPLETED SUCCESSFULLY"
     log " Log File        : ${log_file}"
-    log "--------------------------------------------------------------"
+    log "=============================================================="
 }
 
 main "$@"
