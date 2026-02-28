@@ -6,9 +6,14 @@
 # per GPU. Uses whiptail (a lightweight ncurses dialog tool) for rendering.
 #
 # Screen flow:
-#   Welcome (yesno) --> Main Menu Hub (menu) <--> Profile Picker (radiolist)
-#                            |
-#                       Confirmation (yesno) --> proceed / back to hub
+#   Welcome (yesno) --> GPU Hub (menu) <--> Profile Picker (radiolist)
+#                           |
+#                      Confirmation (yesno) --> proceed / back to hub
+#
+# The GPU hub uses whiptail exit codes to separate actions:
+#   rc=0   (OK / Configure button)  = user selected a GPU
+#   rc=1   (Cancel / Apply button)  = user wants to apply configuration
+#   rc=255 (ESC key)                = user wants to exit
 #
 # Capture pattern: dialogs that return a selection (menu, radiolist)
 # redirect stderr to a temp file (whiptail writes its selection there)
@@ -160,7 +165,7 @@ show_welcome_screen() {
 
     # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
     # (( )) for arithmetic comparison; conditional assignment.
-    (( dlg_h > 14 )) && dlg_h=14
+    (( dlg_h > 16 )) && dlg_h=16
     (( dlg_w > 56 )) && dlg_w=56
 
     local body=""
@@ -170,7 +175,9 @@ show_welcome_screen() {
     body+="  GPUs     ${GPU_COUNT}\n"
     body+="\n"
     body+="  Configure MIG partitions for each GPU\n"
-    body+="  on this worker node."
+    body+="  on this worker node.\n"
+    body+="\n"
+    body+="  TAB to switch buttons, ENTER to confirm."
 
     local formatted
     # printf with %b interprets backslash escapes (\n) in the argument.
@@ -184,15 +191,20 @@ show_welcome_screen() {
         "$dlg_h" "$dlg_w"
 }
 
-# Display the main menu hub showing all GPUs and their current profile
-# selections. APPLY and QUIT sit at the bottom of the same list.
+# Display the GPU selection hub. The menu contains ONLY GPU entries —
+# actions are handled via buttons (Configure = OK, Apply = Cancel)
+# and ESC (exit). This avoids mixing GPU items with action items.
+#
+# whiptail exit codes used:
+#   0   = OK button (Configure) — user selected a GPU to configure
+#   1   = Cancel button (Apply) — user wants to apply and proceed
+#   255 = ESC key — user wants to exit
 #
 # Returns:
-#   0 on selection (result stored in TUI_RESULT)
-#   non-zero on Cancel/ESC
+#   Exit code from whiptail (0, 1, or 255)
 #
 # Side effects:
-#   - Sets TUI_RESULT to the selected menu tag (e.g., "GPU 0", "APPLY")
+#   - Sets TUI_RESULT to the selected GPU tag (e.g., "GPU 0") on rc=0
 show_main_menu() {
     local menu_items=()
     local i
@@ -207,13 +219,8 @@ show_main_menu() {
         menu_items+=("GPU ${i}" "${profile_name}")
     done
 
-    # Action items at the bottom of the menu.
-    # Tags must NOT start with "-" — whiptail would parse them as CLI options.
-    menu_items+=("APPLY" "Apply configuration")
-    menu_items+=("QUIT" "Exit without changes")
-
-    # Calculate menu height: GPU_COUNT + 2 action items, capped at 16.
-    local menu_height=$((GPU_COUNT + 2))
+    # Calculate menu height: one row per GPU, capped at 16.
+    local menu_height=$GPU_COUNT
     (( menu_height > 16 )) && menu_height=16
 
     # Cap dialog dimensions to terminal size minus margin.
@@ -230,10 +237,10 @@ show_main_menu() {
     (( menu_height > max_list )) && menu_height=$max_list
 
     _whiptail_capture \
-        --title " MIG Configuration -- GPU Selection " \
-        --ok-button " Select " \
-        --cancel-button " Exit " \
-        --menu "Choose a GPU to change its profile." \
+        --title " MIG Configuration " \
+        --ok-button " Configure " \
+        --cancel-button " Apply " \
+        --menu "Select a GPU to configure. ESC to exit." \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
@@ -246,11 +253,12 @@ show_main_menu() {
 #   $1 - gpu_idx: The GPU index (0-based) being configured
 #
 # Returns:
-#   0 on selection (result stored in TUI_RESULT)
-#   non-zero on Cancel/ESC (no change)
+#   0   on selection (result stored in TUI_RESULT)
+#   1   on Back button (no change)
+#   255 on ESC (caller should offer exit)
 #
 # Side effects:
-#   - Sets TUI_RESULT to the selected profile index
+#   - Sets TUI_RESULT to the selected profile index on rc=0
 show_profile_picker() {
     local gpu_idx="$1"
     local current_selection="${GPU_SELECTIONS[$gpu_idx]}"
@@ -291,7 +299,7 @@ show_profile_picker() {
         --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "Select a profile for GPU ${gpu_idx}." \
+        --radiolist "SPACE to select, ENTER to confirm. ESC to exit." \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
@@ -300,8 +308,9 @@ show_profile_picker() {
 # table before applying changes.
 #
 # Returns:
-#   0 if user confirms (Apply)
-#   non-zero if user cancels (Back)
+#   0   if user confirms (Apply)
+#   1   if user presses Back
+#   255 if user presses ESC (caller should offer exit)
 show_confirmation() {
     local summary=""
     local i
@@ -320,15 +329,18 @@ show_confirmation() {
 
     summary+="\n"
     summary+="  The node will be cordoned, reconfigured,\n"
-    summary+="  and uncordoned automatically."
+    summary+="  and uncordoned automatically.\n"
+    summary+="\n"
+    summary+="  TAB to switch buttons, ENTER to confirm.\n"
+    summary+="  ESC to exit."
 
     # printf with %b interprets backslash escapes in the argument.
     local formatted
     formatted=$(printf "%b" "$summary")
 
     # Cap dialog dimensions to terminal size minus margin.
-    # GPU_COUNT + 10 rows = GPU lines + header + summary sentence + borders.
-    local dlg_h=$((GPU_COUNT + 10))
+    # GPU_COUNT + 12 rows = GPU lines + header + summary + hint + borders.
+    local dlg_h=$((GPU_COUNT + 12))
     local dlg_w=$((TERM_COLS - 10))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
@@ -346,9 +358,28 @@ show_confirmation() {
 # MAIN LOGIC
 # ============================================================================
 
+# Show an exit confirmation dialog. Used whenever the user presses ESC
+# on any screen to provide a consistent "exit from anywhere" experience.
+#
+# Returns:
+#   0 if user confirms exit, non-zero if user chooses to go back
+_confirm_exit() {
+    whiptail --title " Exit " \
+        --yes-button " Exit " --no-button " Back " \
+        --yesno "\n  Exit without making changes?" 8 42
+}
+
 # Main TUI navigation loop implementing hub-and-spoke navigation.
-# Runs the welcome screen, then enters the main menu hub where users
-# can select GPUs, pick profiles, and ultimately apply or quit.
+# Runs the welcome screen, then enters the GPU hub where users can
+# select GPUs to configure, apply changes, or exit.
+#
+# The hub uses whiptail exit codes to route actions:
+#   rc=0   (Configure) = open profile picker for selected GPU
+#   rc=1   (Apply)     = show confirmation screen
+#   rc=255 (ESC)       = show exit confirmation
+#
+# ESC triggers an exit confirmation on every screen, so the user
+# can always exit directly without navigating back to the hub first.
 #
 # Returns:
 #   0 if user confirmed and wants to proceed with APPLY
@@ -373,46 +404,57 @@ run_tui() {
     # Hub-and-spoke navigation loop.
     while true; do
 
-        if ! show_main_menu; then
-            # Cancel/ESC on main menu -> confirm exit.
-            if whiptail --title " Exit " \
-                    --yes-button " Exit " --no-button " Back " \
-                    --yesno "\n  Exit without making changes?" 8 42; then
-                return 1
-            fi
-            continue
-        fi
+        # show_main_menu returns: 0=Configure, 1=Apply, 255=ESC.
+        # Run with || true to prevent set -e from triggering on rc=1/255.
+        show_main_menu || true
+        local rc=$?
 
-        local choice="$TUI_RESULT"
-
-        case "$choice" in
-            GPU\ *)
+        case $rc in
+            0)
+                # OK button (Configure) — user selected a GPU.
                 # Extract GPU index from "GPU N" tag.
-                # ${choice#GPU } removes the "GPU " prefix, leaving just N.
-                local gpu_idx="${choice#GPU }"
+                # ${TUI_RESULT#GPU } removes the "GPU " prefix, leaving just N.
+                local gpu_idx="${TUI_RESULT#GPU }"
 
-                if show_profile_picker "$gpu_idx"; then
-                    # Validate that the selection is not empty.
-                    if [[ -n "$TUI_RESULT" ]]; then
-                        GPU_SELECTIONS[$gpu_idx]="$TUI_RESULT"
+                # Run profile picker; handle its exit code.
+                show_profile_picker "$gpu_idx" || true
+                local picker_rc=$?
+
+                if [[ $picker_rc -eq 0 && -n "$TUI_RESULT" ]]; then
+                    # User selected a profile.
+                    GPU_SELECTIONS[$gpu_idx]="$TUI_RESULT"
+                elif [[ $picker_rc -eq 255 ]]; then
+                    # ESC on profile picker — offer exit.
+                    if _confirm_exit; then
+                        return 1
                     fi
                 fi
-                # Cancel on profile picker -> return to hub unchanged.
+                # rc=1 (Back button) -> return to hub unchanged.
                 ;;
 
-            "APPLY")
-                if show_confirmation; then
+            1)
+                # Cancel button (Apply) — show confirmation.
+                # show_confirmation returns: 0=Apply, 1=Back, 255=ESC.
+                show_confirmation || true
+                local confirm_rc=$?
+
+                if [[ $confirm_rc -eq 0 ]]; then
                     return 0
+                elif [[ $confirm_rc -eq 255 ]]; then
+                    # ESC on confirmation — offer exit.
+                    if _confirm_exit; then
+                        return 1
+                    fi
                 fi
-                # User chose "Back" -> return to hub.
+                # rc=1 (Back button) -> return to hub.
                 ;;
 
-            "QUIT")
-                if whiptail --title " Exit " \
-                        --yes-button " Exit " --no-button " Back " \
-                        --yesno "\n  Exit without making changes?" 8 42; then
+            *)
+                # ESC (rc=255) or any other code — confirm exit.
+                if _confirm_exit; then
                     return 1
                 fi
+                # User chose "Back" -> return to hub.
                 ;;
         esac
     done
