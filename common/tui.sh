@@ -37,6 +37,14 @@
 readonly MIN_TERM_COLS=80
 readonly MIN_TERM_LINES=24
 
+# Universal navigation hint shown on every screen.
+# Covers all whiptail widget types (menu, radiolist, yesno):
+#   Arrows = navigate list items
+#   TAB    = switch between list and buttons (or between buttons)
+#   ENTER  = confirm the current selection or button
+#   ESC    = exit the tool entirely
+readonly NAV_HINT="Arrows = navigate   TAB = buttons   ENTER = confirm   ESC = exit"
+
 # ============================================================================
 # GLOBAL STATE
 # ============================================================================
@@ -89,14 +97,15 @@ _whiptail_capture() {
     return $rc
 }
 
-# Export the NEWT_COLORS environment variable to apply a green-bordered
-# color theme to all whiptail dialogs.
+# Export the NEWT_COLORS environment variable to apply a green-themed
+# color scheme to all whiptail dialogs.
 #
 # NEWT_COLORS is a newt library feature (whiptail's rendering backend).
 # Each entry sets foreground,background for a UI element.
 #
 # Theme: green borders/titles on black, white text.
 # Buttons: black-on-green (inactive) vs white-on-green (focused).
+# Selected list items use green to match the overall theme.
 #
 # Side effects:
 #   - Sets the NEWT_COLORS environment variable
@@ -171,7 +180,7 @@ show_welcome_screen() {
     # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
     # (( )) for arithmetic comparison; conditional assignment.
     (( dlg_h > 16 )) && dlg_h=16
-    (( dlg_w > 56 )) && dlg_w=56
+    (( dlg_w > 60 )) && dlg_w=60
 
     local body=""
     body+="\n"
@@ -182,7 +191,7 @@ show_welcome_screen() {
     body+="  Configure MIG partitions for each GPU\n"
     body+="  on this worker node.\n"
     body+="\n"
-    body+="  TAB = switch buttons   ENTER = confirm"
+    body+="  ${NAV_HINT}"
 
     local formatted
     # printf with %b interprets backslash escapes (\n) in the argument.
@@ -245,7 +254,7 @@ show_main_menu() {
         --title " MIG Configuration " \
         --ok-button " Configure " \
         --cancel-button " Apply " \
-        --menu "ENTER = configure GPU   TAB = apply   ESC = exit" \
+        --menu "$NAV_HINT" \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
@@ -304,7 +313,7 @@ show_profile_picker() {
         --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "SPACE = select   ENTER = confirm   ESC = exit" \
+        --radiolist "$NAV_HINT" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
@@ -336,7 +345,7 @@ show_confirmation() {
     summary+="  The node will be cordoned, reconfigured,\n"
     summary+="  and uncordoned automatically.\n"
     summary+="\n"
-    summary+="  TAB = switch buttons   ENTER = confirm   ESC = exit"
+    summary+="  ${NAV_HINT}"
 
     # printf with %b interprets backslash escapes in the argument.
     local formatted
@@ -348,7 +357,7 @@ show_confirmation() {
     local dlg_w=$((TERM_COLS - 10))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 56 )) && dlg_w=56
+    (( dlg_w > 60 )) && dlg_w=60
 
     whiptail \
         --title " Confirm Configuration " \
