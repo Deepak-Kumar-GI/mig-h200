@@ -6,7 +6,7 @@
 # per GPU. Uses whiptail (a lightweight ncurses dialog tool) for rendering.
 #
 # Screen flow:
-#   Welcome (yesno) --> GPU Hub (menu) <--> Profile Picker (radiolist)
+#   Welcome (yesno) --> GPU Hub (menu) <--> Profile Picker (menu)
 #                           |
 #                      Confirmation (yesno) --> proceed / back to hub
 #
@@ -15,7 +15,7 @@
 #   rc=1   (Cancel / Apply button)  = user wants to apply configuration
 #   rc=255 (ESC key)                = user wants to exit
 #
-# Capture pattern: dialogs that return a selection (menu, radiolist)
+# Capture pattern: dialogs that return a selection (menu)
 # redirect stderr to a temp file (whiptail writes its selection there)
 # and store the result in the TUI_RESULT global. This avoids the
 # 3>&1 1>&2 2>&3 fd-swap inside $() which breaks under set -euo pipefail.
@@ -50,10 +50,9 @@ readonly MAX_DLG_WIDTH=78
 #   ESC     = exit the tool entirely
 readonly NAV_HINT="Arrows=Navigate  TAB=Switch  ENTER=Confirm  ESC=Exit"
 
-# Extended hint for radiolist screens. Adds SPACE=Select because whiptail
-# radio buttons require pressing SPACE to toggle the selection — arrow
-# keys move the highlight but do not change the selected (filled) radio.
-readonly NAV_HINT_RADIO="SPACE=Select  Arrows=Navigate  TAB=Switch  ENTER=Confirm  ESC=Exit"
+# Navigation hint for the profile picker menu.
+# Same as NAV_HINT but uses ENTER=Select to clarify the action.
+readonly NAV_HINT_PICKER="Arrows=Navigate  TAB=Switch  ENTER=Select  ESC=Exit"
 
 # ============================================================================
 # GLOBAL STATE
@@ -70,7 +69,7 @@ TERM_COLS=80
 TERM_LINES=24
 
 # Holds the output from the last whiptail dialog that returns a selection
-# (--menu, --radiolist). Set by show_main_menu() and show_profile_picker().
+# (--menu). Set by show_main_menu() and show_profile_picker().
 TUI_RESULT=""
 
 # ============================================================================
@@ -285,21 +284,21 @@ show_main_menu() {
 show_profile_picker() {
     local gpu_idx="$1"
     local current_selection="${GPU_SELECTIONS[$gpu_idx]}"
-    local radio_items=()
+    local menu_items=()
     local i
 
     for ((i = 0; i < PROFILE_COUNT; i++)); do
-        local status="OFF"
+        local label="${PROFILE_NAMES[$i]}"
 
-        # Pre-select the currently assigned profile.
+        # Append a marker so the operator can see which profile is
+        # already assigned before making a change.
         if [[ $i -eq $current_selection ]]; then
-            status="ON"
+            label+="  [current]"
         fi
 
-        # Radio list items are: tag description status.
+        # Menu items are: tag description.
         # Tag = profile index (used as the return value).
-        # Description = profile name only, no appended description.
-        radio_items+=("$i" "${PROFILE_NAMES[$i]}" "$status")
+        menu_items+=("$i" "$label")
     done
 
     # Calculate list height: one row per profile, capped at 14.
@@ -318,13 +317,16 @@ show_profile_picker() {
     local max_list=$((dlg_h - 7))
     (( list_height > max_list )) && list_height=$max_list
 
+    # --default-item positions the highlight on the currently assigned
+    # profile so the user sees which one is active on entry.
     _whiptail_capture \
         --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "$NAV_HINT_RADIO" \
+        --default-item "$current_selection" \
+        --menu "$NAV_HINT_PICKER" \
         "$dlg_h" "$dlg_w" "$list_height" \
-        "${radio_items[@]}"
+        "${menu_items[@]}"
 }
 
 # Display a confirmation dialog showing the GPU-to-profile assignment
