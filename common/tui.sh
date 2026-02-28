@@ -178,8 +178,9 @@ show_main_menu() {
         menu_items+=("GPU-${i}" "${profile_name}")
     done
 
-    # Separator and action items (ASCII-safe dash line for portability)
-    menu_items+=("---" "--------------------------------")
+    # Separator and action items.
+    # Tag must NOT start with "-" — whiptail would parse it as a CLI option.
+    menu_items+=("..." "................................")
     menu_items+=("APPLY" ">> Apply configuration to cluster")
     menu_items+=("QUIT" ">> Exit without changes")
 
@@ -429,7 +430,7 @@ run_tui() {
                 fi
                 ;;
 
-            "---")
+            "...")
                 # Separator item — do nothing, return to menu
                 ;;
         esac
