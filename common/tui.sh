@@ -6,9 +6,9 @@
 # per GPU. Uses whiptail (a lightweight ncurses dialog tool) for rendering.
 #
 # Screen flow:
-#   Welcome (msgbox) → Main Menu Hub (menu) ←→ Profile Picker (radiolist)
-#                           ↓
-#                      Confirmation (yesno) → proceed / back to hub
+#   Welcome (yesno) --> Main Menu Hub (menu) <--> Profile Picker (radiolist)
+#                            |
+#                       Confirmation (yesno) --> proceed / back to hub
 #
 # Capture pattern: dialogs that return a selection (menu, radiolist)
 # redirect stderr to a temp file (whiptail writes its selection there)
@@ -29,8 +29,8 @@
 
 # Minimum terminal dimensions required for the TUI.
 # Whiptail needs enough space for menus, radio lists, and confirmation screens.
-readonly MIN_TERM_COLS=60
-readonly MIN_TERM_LINES=20
+readonly MIN_TERM_COLS=80
+readonly MIN_TERM_LINES=24
 
 # ============================================================================
 # GLOBAL STATE
@@ -50,17 +50,42 @@ TERM_LINES=24
 # (--menu, --radiolist). Set by show_main_menu() and show_profile_picker().
 TUI_RESULT=""
 
-# Debug trace file — logs every TUI step to diagnose navigation issues.
-# Check this file after running: cat /tmp/tui-trace.log
-readonly _TUI_TRACE="/tmp/tui-trace.log"
-_trace() { echo "[$(date +%H:%M:%S)] $1" >> "$_TUI_TRACE"; }
-
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-# Export the NEWT_COLORS environment variable to apply an NVIDIA-branded
-# green-on-black color theme to all whiptail dialogs.
+# Capture whiptail's selection via a temp file on stderr.
+# whiptail draws its UI on stdout (terminal) and writes the user's
+# selection to stderr. Redirecting stderr to a temp file captures the
+# selection without needing a $() subshell or the 3>&1 1>&2 2>&3 fd-swap
+# (which breaks under set -euo pipefail in some bash versions).
+#
+# Arguments:
+#   All arguments are passed through to whiptail unchanged.
+#
+# Returns:
+#   whiptail's exit code (0 = selection made, 1 = Cancel, 255 = ESC)
+#
+# Side effects:
+#   - Sets TUI_RESULT to the selected tag (on success) or "" (on cancel)
+#   - Creates and removes a temp file in /tmp
+_whiptail_capture() {
+    local _tmpf
+    # mktemp creates a unique temp file securely (no race conditions).
+    _tmpf=$(mktemp)
+
+    whiptail "$@" 2>"$_tmpf"
+    local rc=$?
+
+    # $(<file) reads file contents without spawning a subprocess (cat).
+    TUI_RESULT=$(<"$_tmpf")
+    rm -f "$_tmpf"
+
+    return $rc
+}
+
+# Export the NEWT_COLORS environment variable to apply a clean
+# cyan/white color theme with green highlights to all whiptail dialogs.
 #
 # NEWT_COLORS is a newt library feature (whiptail's rendering backend).
 # Each entry sets foreground,background for a UI element.
@@ -69,9 +94,8 @@ _trace() { echo "[$(date +%H:%M:%S)] $1" >> "$_TUI_TRACE"; }
 #   - Sets the NEWT_COLORS environment variable
 setup_tui_colors() {
     # shellcheck disable=SC2155
-    # Cyan/white theme with green highlight for the focused (active) element.
     # button    = inactive buttons (black text on cyan bg)
-    # actbutton = focused button (black text on GREEN bg — clearly distinct)
+    # actbutton = focused button (black text on GREEN bg -- clearly distinct)
     # actlistbox/actcheckbox use cyan highlight; active button uses green
     # so the focused button always stands out from list selections.
     export NEWT_COLORS='
@@ -122,39 +146,50 @@ check_tui_deps() {
     return 0
 }
 
-# Display the welcome screen with GPU hardware information.
-# Shows GPU model, memory, and count from the parsed template.
-# Dialog dimensions are capped to fit the current terminal.
+# ============================================================================
+# TUI SCREENS
+# ============================================================================
+
+# Display the welcome screen with GPU hardware information and navigation
+# instructions. Uses --yesno with Continue/Exit buttons.
 #
 # Returns:
-#   0 if user presses OK, non-zero if user presses ESC/Cancel
+#   0 if user presses Continue, non-zero if user presses Exit/ESC
 show_welcome_screen() {
-    # Cap dialog to terminal size minus a 2-line/4-col margin so whiptail
-    # never tries to draw outside the terminal (which causes it to fail).
-    local dlg_h=$((TERM_LINES - 2))
-    local dlg_w=$((TERM_COLS - 4))
+    local dlg_h=$((TERM_LINES - 4))
+    local dlg_w=$((TERM_COLS - 10))
 
     # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
     # (( )) for arithmetic comparison; conditional assignment.
-    (( dlg_h > 14 )) && dlg_h=14
-    (( dlg_w > 58 )) && dlg_w=58
+    (( dlg_h > 20 )) && dlg_h=20
+    (( dlg_w > 68 )) && dlg_w=68
 
-    # --yesno with Continue/Exit buttons instead of a plain msgbox,
-    # so the operator has an explicit exit option on the first screen.
+    local body=""
+    body+="       NVIDIA MIG Partition Configuration\n"
+    body+="\n"
+    body+="  Hardware Summary\n"
+    body+="  ================================================\n"
+    body+="   GPU Model   :  ${GPU_MODEL}\n"
+    body+="   GPU Memory  :  ${GPU_MEMORY}\n"
+    body+="   GPU Count   :  ${GPU_COUNT}\n"
+    body+="  ================================================\n"
+    body+="\n"
+    body+="  This tool lets you select a MIG partition\n"
+    body+="  profile for each GPU, then automatically\n"
+    body+="  applies the configuration to the cluster.\n"
+    body+="\n"
+    body+="  Navigation:\n"
+    body+="    Arrow keys .... Move       TAB ....... Buttons\n"
+    body+="    SPACE ......... Select     ENTER ..... Confirm"
+
+    local formatted
+    formatted=$(printf "%b" "$body")
+
     whiptail \
-        --title "NVIDIA MIG Configuration Tool" \
-        --yes-button "Continue" \
-        --no-button "Exit" \
-        --yesno "Welcome to the MIG Configuration Tool
-
-GPU Model  : ${GPU_MODEL}
-GPU Memory : ${GPU_MEMORY}
-GPU Count  : ${GPU_COUNT}
-
-Select a MIG profile for each GPU, then
-apply to run the full workflow automatically.
-
-TAB = switch buttons   ENTER = confirm" \
+        --title " NVIDIA MIG Configuration Tool " \
+        --yes-button " Continue " \
+        --no-button " Exit " \
+        --yesno "$formatted" \
         "$dlg_h" "$dlg_w"
 }
 
@@ -171,69 +206,50 @@ show_main_menu() {
     local menu_items=()
     local i
 
-    # Build menu items: one entry per GPU showing its current profile
+    # Build menu items: one entry per GPU showing its current profile.
+    # printf pads the GPU index to keep the menu aligned.
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
         local profile_name="${PROFILE_NAMES[$profile_idx]}"
-        menu_items+=("GPU-${i}" "${profile_name}")
+
+        # Tag = "GPU-N", Description = profile name with arrow prefix
+        menu_items+=("GPU-${i}" "=> ${profile_name}")
     done
 
-    # Separator and action items.
-    # Tag must NOT start with "-" — whiptail would parse it as a CLI option.
-    menu_items+=("..." "................................")
-    menu_items+=("APPLY" ">> Apply configuration to cluster")
-    menu_items+=("QUIT" ">> Exit without changes")
+    # Action items at the bottom of the menu.
+    # Tags must NOT start with "-" -- whiptail would parse them as CLI options.
+    menu_items+=("APPLY" "** Apply configuration to cluster **")
+    menu_items+=("QUIT" "   Exit without changes")
 
-    # Calculate menu height: GPU_COUNT + 3 action items, capped at 16
-    local menu_height=$((GPU_COUNT + 3))
+    # Calculate menu height: GPU_COUNT + 2 action items, capped at 16
+    local menu_height=$((GPU_COUNT + 2))
     (( menu_height > 16 )) && menu_height=16
 
     # Cap dialog dimensions to terminal size minus margin.
     # 8 extra rows = title + border + prompt text + button row + padding.
     local dlg_h=$((menu_height + 8))
-    local dlg_w=$((TERM_COLS - 4))
+    local dlg_w=$((TERM_COLS - 10))
 
-    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
-    (( dlg_w > 64 )) && dlg_w=64
+    (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
+    (( dlg_w > 70 )) && dlg_w=70
 
-    # Recalculate menu_height if dialog was clamped — whiptail needs
+    # Recalculate menu_height if dialog was clamped -- whiptail needs
     # the list area to fit inside the dialog (dialog - ~7 overhead rows).
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
-    _trace "show_main_menu: dlg=${dlg_h}x${dlg_w} menu_height=${menu_height} items=${#menu_items[@]} term=${TERM_COLS}x${TERM_LINES}"
-
-    # Capture whiptail's selection via a temp file on stderr.
-    # whiptail draws its UI on stdout (terminal) and writes the user's
-    # selection to stderr. Redirecting stderr to a temp file captures the
-    # selection without needing a $() subshell or the 3>&1 1>&2 2>&3 fd-swap
-    # (which can break under set -euo pipefail in some bash versions).
-    local _tmpf
-    _tmpf=$(mktemp)
-
-    _trace "show_main_menu: calling whiptail (tmpf=$_tmpf)"
-
-    whiptail \
-        --title "MIG Configuration - GPU Selection" \
-        --ok-button "Select" \
-        --cancel-button "Exit" \
-        --menu "Arrows=navigate  TAB=buttons  ENTER=confirm" \
+    _whiptail_capture \
+        --title " MIG Configuration :: GPU Selection " \
+        --ok-button " Select " \
+        --cancel-button " Exit " \
+        --menu "Select a GPU to change its profile, or APPLY to proceed." \
         "$dlg_h" "$dlg_w" "$menu_height" \
-        "${menu_items[@]}" \
-        2>"$_tmpf"
-    local rc=$?
-
-    # $(<file) reads the file contents without spawning a subprocess (cat).
-    TUI_RESULT=$(<"$_tmpf")
-    rm -f "$_tmpf"
-
-    _trace "show_main_menu: rc=$rc TUI_RESULT='$TUI_RESULT'"
-
-    return $rc
+        "${menu_items[@]}"
 }
 
 # Display a radio list of all available MIG profiles for a specific GPU.
-# The current selection is pre-selected (ON).
+# Shows the profile description alongside each name so the operator
+# knows what each profile provides.
 #
 # Arguments:
 #   $1 - gpu_idx: The GPU index (0-based) being configured
@@ -258,10 +274,16 @@ show_profile_picker() {
             status="ON"
         fi
 
+        # Build a descriptive label: name + description
+        # Example: "1g.18gb x7  --  7 small slices, 18GB each"
+        local label="${PROFILE_NAMES[$i]}"
+        if [[ -n "${PROFILE_DESCS[$i]}" ]]; then
+            label+="  --  ${PROFILE_DESCS[$i]}"
+        fi
+
         # Radio list items are: tag description status
         # Tag = profile index (used as the return value)
-        # Description = profile name (whiptail truncates if it overflows)
-        radio_items+=("$i" "${PROFILE_NAMES[$i]}" "$status")
+        radio_items+=("$i" "$label" "$status")
     done
 
     # Calculate list height: one row per profile, capped at 14
@@ -271,82 +293,79 @@ show_profile_picker() {
     # Cap dialog dimensions to terminal size minus margin.
     # 9 extra rows = title + border + prompt text + button row + padding.
     local dlg_h=$((list_height + 9))
-    local dlg_w=$((TERM_COLS - 4))
+    local dlg_w=$((TERM_COLS - 6))
 
-    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
-    (( dlg_w > 64 )) && dlg_w=64
+    (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
+    (( dlg_w > 78 )) && dlg_w=78
 
     # Recalculate list_height if dialog was clamped
     local max_list=$((dlg_h - 8))
     (( list_height > max_list )) && list_height=$max_list
 
-    # Capture selection via temp file (same pattern as show_main_menu).
-    # --ok-button "Select" confirms, --cancel-button "Back" returns to hub.
-    local _tmpf
-    _tmpf=$(mktemp)
-
-    whiptail \
-        --title "Select MIG Profile for GPU-${gpu_idx}" \
-        --ok-button "Select" \
-        --cancel-button "Back" \
-        --radiolist "SPACE=pick  TAB=buttons  ENTER=confirm" \
+    _whiptail_capture \
+        --title " GPU-${gpu_idx} :: Select MIG Profile " \
+        --ok-button " Select " \
+        --cancel-button " Back " \
+        --radiolist "SPACE = pick a profile    TAB = switch buttons    ENTER = confirm" \
         "$dlg_h" "$dlg_w" "$list_height" \
-        "${radio_items[@]}" \
-        2>"$_tmpf"
-    local rc=$?
-
-    TUI_RESULT=$(<"$_tmpf")
-    rm -f "$_tmpf"
-
-    return $rc
+        "${radio_items[@]}"
 }
 
-# Display a confirmation dialog showing the full GPU→profile assignment
+# Display a confirmation dialog showing the full GPU->profile assignment
 # table before applying changes.
 #
 # Returns:
-#   0 if user confirms (Yes)
-#   non-zero if user cancels (No)
+#   0 if user confirms (Apply)
+#   non-zero if user cancels (Back)
 show_confirmation() {
     local summary=""
     local i
 
-    summary+="Review the MIG configuration:\n\n"
-    summary+="  GPU | Profile\n"
-    summary+="  ----+-------------------------------\n"
+    summary+="  GPU  | MIG Profile\n"
+    summary+="  =====+=============================================\n"
 
     for ((i = 0; i < GPU_COUNT; i++)); do
         local profile_idx="${GPU_SELECTIONS[$i]}"
         local profile_name="${PROFILE_NAMES[$profile_idx]}"
 
         # printf pads the GPU number to align the table columns.
-        # %-4s = left-aligned, 4-character wide string field.
-        summary+="$(printf "  %-4s| %s" "$i" "$profile_name")\n"
+        # %-5s = left-aligned, 5-character wide string field.
+        summary+="$(printf "  %-5s| %s" "$i" "$profile_name")\n"
     done
 
-    summary+="\nThis will cordon the node, apply MIG\n"
-    summary+="partitions, generate CDI, and uncordon.\n\n"
-    summary+="TAB=switch buttons  ENTER=confirm\n\n"
-    summary+="Proceed?"
+    summary+="  =====+=============================================\n"
+    summary+="\n"
+    summary+="  This will:\n"
+    summary+="    1. Cordon the worker node\n"
+    summary+="    2. Apply MIG partition configuration\n"
+    summary+="    3. Generate CDI specification\n"
+    summary+="    4. Switch runtime to CDI mode\n"
+    summary+="    5. Uncordon the worker node\n"
+    summary+="\n"
+    summary+="  Proceed with applying this configuration?"
 
     # printf with %b interprets backslash escapes in the argument
     local formatted
     formatted=$(printf "%b" "$summary")
 
     # Cap dialog dimensions to terminal size minus margin
-    local dlg_h=$((GPU_COUNT + 16))
-    local dlg_w=$((TERM_COLS - 4))
+    local dlg_h=$((GPU_COUNT + 20))
+    local dlg_w=$((TERM_COLS - 10))
 
-    (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
-    (( dlg_w > 54 )) && dlg_w=54
+    (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
+    (( dlg_w > 60 )) && dlg_w=60
 
     whiptail \
-        --title "Confirm MIG Configuration" \
+        --title " Confirm MIG Configuration " \
+        --yes-button " Apply " \
+        --no-button " Back " \
         --yesno "$formatted" \
-        "$dlg_h" "$dlg_w" \
-        --yes-button "Apply" \
-        --no-button "Back"
+        "$dlg_h" "$dlg_w"
 }
+
+# ============================================================================
+# MAIN LOGIC
+# ============================================================================
 
 # Main TUI navigation loop implementing hub-and-spoke navigation.
 # Runs the welcome screen, then enters the main menu hub where users
@@ -359,11 +378,6 @@ show_confirmation() {
 # Side effects:
 #   - Populates GPU_SELECTIONS[] with user choices
 run_tui() {
-    echo "=== TUI trace $(date) ===" > "$_TUI_TRACE"
-    _trace "run_tui: GPU_COUNT=$GPU_COUNT PROFILE_COUNT=$PROFILE_COUNT"
-    _trace "run_tui: bash=$BASH_VERSION set=$(set +o | grep -E 'errexit|nounset|pipefail')"
-    _trace "run_tui: stdout=$(ls -la /proc/$$/fd/1 2>/dev/null) stderr=$(ls -la /proc/$$/fd/2 2>/dev/null)"
-
     # Initialize all GPUs to profile 0 (typically "MIG Disabled")
     local i
     for ((i = 0; i < GPU_COUNT; i++)); do
@@ -373,30 +387,22 @@ run_tui() {
     setup_tui_colors
 
     # Show welcome screen; exit if user cancels
-    _trace "run_tui: calling show_welcome_screen"
     if ! show_welcome_screen; then
-        _trace "run_tui: welcome returned non-zero (user cancelled)"
         return 1
     fi
-    _trace "run_tui: welcome returned 0, proceeding to main menu"
 
     # Hub-and-spoke navigation loop
     while true; do
 
-        _trace "run_tui: calling show_main_menu"
         if ! show_main_menu; then
-            _trace "run_tui: show_main_menu returned non-zero, showing exit dialog"
-            # Cancel/ESC on main menu → confirm exit
-            if whiptail --title "Exit" \
-                    --yes-button "Exit" --no-button "Back" \
-                    --yesno "Exit without making changes?" 8 44; then
-                _trace "run_tui: user chose Exit"
+            # Cancel/ESC on main menu -> confirm exit
+            if whiptail --title " Exit " \
+                    --yes-button " Exit " --no-button " Back " \
+                    --yesno "\n  Exit without making changes?" 9 44; then
                 return 1
             fi
-            _trace "run_tui: user chose Back, continuing loop"
             continue
         fi
-        _trace "run_tui: show_main_menu returned 0, TUI_RESULT='$TUI_RESULT'"
 
         local choice="$TUI_RESULT"
 
@@ -412,26 +418,22 @@ run_tui() {
                         GPU_SELECTIONS[$gpu_idx]="$TUI_RESULT"
                     fi
                 fi
-                # Cancel on profile picker → return to hub unchanged
+                # Cancel on profile picker -> return to hub unchanged
                 ;;
 
             "APPLY")
                 if show_confirmation; then
                     return 0
                 fi
-                # User chose "Back" → return to hub
+                # User chose "Back" -> return to hub
                 ;;
 
             "QUIT")
-                if whiptail --title "Exit" \
-                        --yes-button "Exit" --no-button "Back" \
-                        --yesno "Exit without making changes?" 8 44; then
+                if whiptail --title " Exit " \
+                        --yes-button " Exit " --no-button " Back " \
+                        --yesno "\n  Exit without making changes?" 9 44; then
                     return 1
                 fi
-                ;;
-
-            "...")
-                # Separator item — do nothing, return to menu
                 ;;
         esac
     done
