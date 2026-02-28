@@ -37,13 +37,23 @@
 readonly MIN_TERM_COLS=80
 readonly MIN_TERM_LINES=24
 
-# Universal navigation hint shown on every screen.
-# Covers all whiptail widget types (menu, radiolist, yesno):
-#   Arrows = navigate list items
-#   TAB    = switch between list and buttons (or between buttons)
-#   ENTER  = confirm the current selection or button
-#   ESC    = exit the tool entirely
-readonly NAV_HINT="Arrows = navigate   TAB = buttons   ENTER = confirm   ESC = exit"
+# Maximum dialog width (characters). Wide enough for navigation hints
+# to display on a single line (~66 chars for the longest hint) but
+# capped so dialogs don't look stretched on very wide terminals.
+readonly MAX_DLG_WIDTH=78
+
+# Navigation hint for menu and yesno screens.
+# Key=Action format keeps each hint compact to fit on one line.
+#   Arrows  = navigate list items
+#   TAB     = switch between list area and buttons
+#   ENTER   = confirm the current selection or button
+#   ESC     = exit the tool entirely
+readonly NAV_HINT="Arrows=Navigate  TAB=Switch  ENTER=Confirm  ESC=Exit"
+
+# Extended hint for radiolist screens. Adds SPACE=Select because whiptail
+# radio buttons require pressing SPACE to toggle the selection — arrow
+# keys move the highlight but do not change the selected (filled) radio.
+readonly NAV_HINT_RADIO="SPACE=Select  Arrows=Navigate  TAB=Switch  ENTER=Confirm  ESC=Exit"
 
 # ============================================================================
 # GLOBAL STATE
@@ -175,12 +185,12 @@ check_tui_deps() {
 #   0 if user presses Continue, non-zero if user presses Exit/ESC
 show_welcome_screen() {
     local dlg_h=$((TERM_LINES - 4))
-    local dlg_w=$((TERM_COLS - 10))
+    local dlg_w=$((TERM_COLS - 8))
 
     # Clamp to sane maximums so the dialog doesn't look stretched on huge terminals.
     # (( )) for arithmetic comparison; conditional assignment.
     (( dlg_h > 16 )) && dlg_h=16
-    (( dlg_w > 60 )) && dlg_w=60
+    (( dlg_w > MAX_DLG_WIDTH )) && dlg_w=$MAX_DLG_WIDTH
 
     local body=""
     body+="\n"
@@ -240,10 +250,10 @@ show_main_menu() {
     # Cap dialog dimensions to terminal size minus margin.
     # 8 extra rows = title + border + prompt text + button row + padding.
     local dlg_h=$((menu_height + 8))
-    local dlg_w=$((TERM_COLS - 10))
+    local dlg_w=$((TERM_COLS - 8))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 60 )) && dlg_w=60
+    (( dlg_w > MAX_DLG_WIDTH )) && dlg_w=$MAX_DLG_WIDTH
 
     # Recalculate menu_height if dialog was clamped — whiptail needs
     # the list area to fit inside the dialog (dialog - ~7 overhead rows).
@@ -300,10 +310,10 @@ show_profile_picker() {
     # Cap dialog dimensions to terminal size minus margin.
     # 8 extra rows = title + border + prompt text + button row + padding.
     local dlg_h=$((list_height + 8))
-    local dlg_w=$((TERM_COLS - 10))
+    local dlg_w=$((TERM_COLS - 8))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 60 )) && dlg_w=60
+    (( dlg_w > MAX_DLG_WIDTH )) && dlg_w=$MAX_DLG_WIDTH
 
     # Recalculate list_height if dialog was clamped.
     local max_list=$((dlg_h - 7))
@@ -313,7 +323,7 @@ show_profile_picker() {
         --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "$NAV_HINT" \
+        --radiolist "$NAV_HINT_RADIO" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
@@ -354,10 +364,10 @@ show_confirmation() {
     # Cap dialog dimensions to terminal size minus margin.
     # GPU_COUNT + 12 rows = GPU lines + header + summary + hint + borders.
     local dlg_h=$((GPU_COUNT + 12))
-    local dlg_w=$((TERM_COLS - 10))
+    local dlg_w=$((TERM_COLS - 8))
 
     (( dlg_h > TERM_LINES - 4 )) && dlg_h=$((TERM_LINES - 4))
-    (( dlg_w > 60 )) && dlg_w=60
+    (( dlg_w > MAX_DLG_WIDTH )) && dlg_w=$MAX_DLG_WIDTH
 
     whiptail \
         --title " Confirm Configuration " \
