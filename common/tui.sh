@@ -50,6 +50,11 @@ TERM_LINES=24
 # (--menu, --radiolist). Set by show_main_menu() and show_profile_picker().
 TUI_RESULT=""
 
+# Debug trace file — logs every TUI step to diagnose navigation issues.
+# Check this file after running: cat /tmp/tui-trace.log
+readonly _TUI_TRACE="/tmp/tui-trace.log"
+_trace() { echo "[$(date +%H:%M:%S)] $1" >> "$_TUI_TRACE"; }
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -195,6 +200,8 @@ show_main_menu() {
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
+    _trace "show_main_menu: dlg=${dlg_h}x${dlg_w} menu_height=${menu_height} items=${#menu_items[@]} term=${TERM_COLS}x${TERM_LINES}"
+
     # Capture whiptail's selection via a temp file on stderr.
     # whiptail draws its UI on stdout (terminal) and writes the user's
     # selection to stderr. Redirecting stderr to a temp file captures the
@@ -202,6 +209,8 @@ show_main_menu() {
     # (which can break under set -euo pipefail in some bash versions).
     local _tmpf
     _tmpf=$(mktemp)
+
+    _trace "show_main_menu: calling whiptail (tmpf=$_tmpf)"
 
     whiptail \
         --title "MIG Configuration - GPU Selection" \
@@ -216,6 +225,8 @@ show_main_menu() {
     # $(<file) reads the file contents without spawning a subprocess (cat).
     TUI_RESULT=$(<"$_tmpf")
     rm -f "$_tmpf"
+
+    _trace "show_main_menu: rc=$rc TUI_RESULT='$TUI_RESULT'"
 
     return $rc
 }
@@ -347,6 +358,11 @@ show_confirmation() {
 # Side effects:
 #   - Populates GPU_SELECTIONS[] with user choices
 run_tui() {
+    echo "=== TUI trace $(date) ===" > "$_TUI_TRACE"
+    _trace "run_tui: GPU_COUNT=$GPU_COUNT PROFILE_COUNT=$PROFILE_COUNT"
+    _trace "run_tui: bash=$BASH_VERSION set=$(set +o | grep -E 'errexit|nounset|pipefail')"
+    _trace "run_tui: stdout=$(ls -la /proc/$$/fd/1 2>/dev/null) stderr=$(ls -la /proc/$$/fd/2 2>/dev/null)"
+
     # Initialize all GPUs to profile 0 (typically "MIG Disabled")
     local i
     for ((i = 0; i < GPU_COUNT; i++)); do
@@ -356,22 +372,30 @@ run_tui() {
     setup_tui_colors
 
     # Show welcome screen; exit if user cancels
+    _trace "run_tui: calling show_welcome_screen"
     if ! show_welcome_screen; then
+        _trace "run_tui: welcome returned non-zero (user cancelled)"
         return 1
     fi
+    _trace "run_tui: welcome returned 0, proceeding to main menu"
 
     # Hub-and-spoke navigation loop
     while true; do
 
+        _trace "run_tui: calling show_main_menu"
         if ! show_main_menu; then
+            _trace "run_tui: show_main_menu returned non-zero, showing exit dialog"
             # Cancel/ESC on main menu → confirm exit
             if whiptail --title "Exit" \
                     --yes-button "Exit" --no-button "Back" \
                     --yesno "Exit without making changes?" 8 44; then
+                _trace "run_tui: user chose Exit"
                 return 1
             fi
+            _trace "run_tui: user chose Back, continuing loop"
             continue
         fi
+        _trace "run_tui: show_main_menu returned 0, TUI_RESULT='$TUI_RESULT'"
 
         local choice="$TUI_RESULT"
 
