@@ -102,6 +102,9 @@ _whiptail_capture() {
 #   - Sets the NEWT_COLORS environment variable
 setup_tui_colors() {
     # shellcheck disable=SC2155
+    # sellistbox    = selected (toggled) item in a radiolist/checklist
+    # actsellistbox = focused + selected item in a radiolist/checklist
+    # Without these, whiptail falls back to its default red highlight.
     export NEWT_COLORS='
         root=white,black
         border=green,black
@@ -114,6 +117,8 @@ setup_tui_colors() {
         actcheckbox=black,green
         listbox=white,black
         actlistbox=black,green
+        sellistbox=black,green
+        actsellistbox=white,green
         textbox=white,black
         roottext=green,black
     '
@@ -177,7 +182,7 @@ show_welcome_screen() {
     body+="  Configure MIG partitions for each GPU\n"
     body+="  on this worker node.\n"
     body+="\n"
-    body+="  TAB to switch buttons, ENTER to confirm."
+    body+="  TAB = switch buttons   ENTER = confirm"
 
     local formatted
     # printf with %b interprets backslash escapes (\n) in the argument.
@@ -240,7 +245,7 @@ show_main_menu() {
         --title " MIG Configuration " \
         --ok-button " Configure " \
         --cancel-button " Apply " \
-        --menu "Select a GPU to configure. ESC to exit." \
+        --menu "ENTER = configure GPU   TAB = apply   ESC = exit" \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
@@ -299,7 +304,7 @@ show_profile_picker() {
         --title " GPU ${gpu_idx} -- MIG Profile " \
         --ok-button " Select " \
         --cancel-button " Back " \
-        --radiolist "SPACE to select, ENTER to confirm. ESC to exit." \
+        --radiolist "SPACE = select   ENTER = confirm   ESC = exit" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
@@ -331,8 +336,7 @@ show_confirmation() {
     summary+="  The node will be cordoned, reconfigured,\n"
     summary+="  and uncordoned automatically.\n"
     summary+="\n"
-    summary+="  TAB to switch buttons, ENTER to confirm.\n"
-    summary+="  ESC to exit."
+    summary+="  TAB = switch buttons   ENTER = confirm   ESC = exit"
 
     # printf with %b interprets backslash escapes in the argument.
     local formatted
