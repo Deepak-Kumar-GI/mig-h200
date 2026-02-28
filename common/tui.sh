@@ -198,8 +198,7 @@ show_welcome_screen() {
     body+="  Memory   ${GPU_MEMORY}\n"
     body+="  GPUs     ${GPU_COUNT}\n"
     body+="\n"
-    body+="  Configure MIG partitions for each GPU\n"
-    body+="  on this worker node.\n"
+    body+="  Configure MIG partitions for each GPU on this worker node.\n"
     body+="\n"
     body+="  ${NAV_HINT}"
 
