@@ -409,9 +409,11 @@ run_tui() {
     while true; do
 
         # show_main_menu returns: 0=Configure, 1=Apply, 255=ESC.
-        # Run with || true to prevent set -e from triggering on rc=1/255.
-        show_main_menu || true
-        local rc=$?
+        # Use `|| rc=$?` instead of `|| true` to capture the actual
+        # exit code. `|| true` would always set $? to 0 (the exit code
+        # of `true`), masking the real return value from whiptail.
+        local rc=0
+        show_main_menu || rc=$?
 
         case $rc in
             0)
@@ -421,8 +423,8 @@ run_tui() {
                 local gpu_idx="${TUI_RESULT#GPU }"
 
                 # Run profile picker; handle its exit code.
-                show_profile_picker "$gpu_idx" || true
-                local picker_rc=$?
+                local picker_rc=0
+                show_profile_picker "$gpu_idx" || picker_rc=$?
 
                 if [[ $picker_rc -eq 0 && -n "$TUI_RESULT" ]]; then
                     # User selected a profile.
@@ -439,8 +441,8 @@ run_tui() {
             1)
                 # Cancel button (Apply) — show confirmation.
                 # show_confirmation returns: 0=Apply, 1=Back, 255=ESC.
-                show_confirmation || true
-                local confirm_rc=$?
+                local confirm_rc=0
+                show_confirmation || confirm_rc=$?
 
                 if [[ $confirm_rc -eq 0 ]]; then
                     return 0
