@@ -1,0 +1,76 @@
+# ============================================================================
+# MIG Configuration Template - NVIDIA H200
+# ============================================================================
+# Defines GPU model metadata and all available MIG partition profiles.
+# The TUI (mig-configure.sh) reads this file to present profile choices.
+#
+# To support a different GPU (e.g., B200), create a new template file
+# with that GPU's profiles and set MIG_TEMPLATE_FILE in config.sh.
+#
+# Format:
+#   gpu:      - model name, memory, GPU count
+#   profiles: - list of MIG profiles, each with:
+#       name:        - display name shown in TUI
+#       description: - one-line explanation for operators
+#       mig-enabled: - true (partitioned) or false (full GPU)
+#       mig-devices: - slice type → count mapping (omitted when mig-enabled: false)
+#
+# Author: GRIL Team <support.ai@giindia.com>
+# Organization: Global Infoventures
+# Date: 2026-02-28
+# ============================================================================
+
+gpu:
+  model: NVIDIA H200
+  memory: 141GB HBM3e
+  count: 8
+
+profiles:
+  - name: MIG Disabled (Full GPU)
+    description: Full GPU - 141GB VRAM, 7/7 SMs, no partitioning
+    mig-enabled: false
+
+  - name: 1g.18gb x7
+    description: 7 small slices, 18GB each, 1/7 SMs per slice
+    mig-enabled: true
+    mig-devices:
+      "1g.18gb": 7
+
+  - name: 1g.18gb+me x1 + 1g.18gb x6
+    description: 1 media-ext slice + 6 standard, 18GB each, 1/7 SMs
+    mig-enabled: true
+    mig-devices:
+      "1g.18gb+me": 1
+      "1g.18gb": 6
+
+  - name: 1g.35gb x4
+    description: 4 medium slices, 35GB each, 1/7 SMs per slice
+    mig-enabled: true
+    mig-devices:
+      "1g.35gb": 4
+
+  - name: 2g.35gb x3
+    description: 3 medium slices, 35GB each, 2/7 SMs per slice
+    mig-enabled: true
+    mig-devices:
+      "2g.35gb": 3
+
+  - name: 2g.35gb x3 + 1g.35gb x1
+    description: Mixed 3x 2g.35gb + 1x 1g.35gb, fills GPU exactly
+    mig-enabled: true
+    mig-devices:
+      "2g.35gb": 3
+      "1g.35gb": 1
+
+  - name: 3g.71gb x2
+    description: 2 large slices, 71GB each, 3/7 SMs per slice
+    mig-enabled: true
+    mig-devices:
+      "3g.71gb": 2
+
+  - name: 4g.71gb x1 + 3g.71gb x1
+    description: Mixed 1x large (4/7 SMs) + 1x med-large (3/7 SMs), 71GB each
+    mig-enabled: true
+    mig-devices:
+      "4g.71gb": 1
+      "3g.71gb": 1

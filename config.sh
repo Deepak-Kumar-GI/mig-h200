@@ -31,6 +31,10 @@ GPU_OPERATOR_NAMESPACE="gpu-operator"
 # MIG partition layout. Applied by post.sh during reprovisioning.
 MIG_CONFIG_FILE="custom-mig-config.yaml"
 
+# Path to the MIG configuration template file that defines available
+# profiles for the TUI. Change this for different GPU models.
+MIG_TEMPLATE_FILE="custom-mig-config-template.yaml"
+
 # ============================================================================
 # GLOBAL LOCK
 # ============================================================================
