@@ -63,13 +63,17 @@ TUI_RESULT=""
 #   - Sets the NEWT_COLORS environment variable
 setup_tui_colors() {
     # shellcheck disable=SC2155
+    # button  = inactive buttons (green text blends with dialog background)
+    # actbutton = focused button (black-on-green stands out as a highlighted box)
+    # This contrast is critical — without it, TAB appears broken because
+    # the user cannot see which button has focus.
     export NEWT_COLORS='
         root=green,black
         border=green,black
         window=green,black
         shadow=green,black
         title=green,black
-        button=black,green
+        button=green,black
         actbutton=black,green
         checkbox=green,black
         actcheckbox=black,green
@@ -149,9 +153,7 @@ GPU Count  : ${GPU_COUNT}
 Select a MIG profile for each GPU, then
 apply to run the full workflow automatically.
 
-Navigation:
-  Arrow keys = move    TAB   = switch buttons
-  SPACE      = select  ENTER = confirm" \
+TAB = switch buttons   ENTER = confirm" \
         "$dlg_h" "$dlg_w"
 }
 
