@@ -63,30 +63,25 @@ TUI_RESULT=""
 #   - Sets the NEWT_COLORS environment variable
 setup_tui_colors() {
     # shellcheck disable=SC2155
-    # button    = inactive buttons (green text blends with dialog background)
-    # actbutton = focused button (white-on-green is brighter, clearly distinct)
-    # This contrast is critical — without it, TAB appears broken because
-    # the user cannot see which button has focus.
+    # Cyan/white theme with green highlight for the focused (active) element.
+    # button    = inactive buttons (black text on cyan bg)
+    # actbutton = focused button (black text on GREEN bg — clearly distinct)
+    # actlistbox/actcheckbox use cyan highlight; active button uses green
+    # so the focused button always stands out from list selections.
     export NEWT_COLORS='
-        root=green,black
-        border=green,black
-        window=green,black
-        shadow=green,black
-        title=green,black
-        button=green,black
-        actbutton=white,green
-        checkbox=green,black
-        actcheckbox=black,green
-        listbox=green,black
-        actlistbox=black,green
-        sellistbox=black,green
-        actsellistbox=black,green
-        textbox=green,black
-        acttextbox=black,green
-        entry=green,black
-        compactbutton=black,green
-        helpline=green,black
-        roottext=green,black
+        root=white,black
+        border=cyan,black
+        window=white,black
+        shadow=,black
+        title=cyan,black
+        button=black,cyan
+        actbutton=black,green
+        checkbox=white,black
+        actcheckbox=black,cyan
+        listbox=white,black
+        actlistbox=black,cyan
+        textbox=white,black
+        roottext=cyan,black
     '
 }
 
