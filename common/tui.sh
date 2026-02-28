@@ -10,6 +10,13 @@
 #                           ↓
 #                      Confirmation (yesno) → proceed / back to hub
 #
+# All whiptail calls use explicit /dev/tty redirection for stdin/stdout
+# so the TUI works correctly regardless of how the calling script
+# redirects its own file descriptors (pipes, subshells, log captures).
+# Dialogs that return a user selection (menu, radiolist) capture it via
+# a temp file on stderr and store the result in the TUI_RESULT global,
+# avoiding the fragile "3>&1 1>&2 2>&3" fd-swap idiom entirely.
+#
 # Depends on: common/template-parser.sh (profile arrays must be populated)
 #
 # Author: GRIL Team <support.ai@giindia.com>
@@ -39,6 +46,72 @@ declare -a GPU_SELECTIONS
 # Used to size every dialog so it never exceeds the terminal.
 TERM_COLS=80
 TERM_LINES=24
+
+# Holds the output from the last whiptail dialog that returns a selection
+# (--menu, --radiolist). Set by _whiptail_capture().
+# Using a global avoids command substitution ($(...)) which runs in a
+# subshell and can interfere with whiptail's terminal access.
+TUI_RESULT=""
+
+# ============================================================================
+# WHIPTAIL WRAPPERS
+# ============================================================================
+
+# Run a whiptail dialog that does NOT produce output (--msgbox, --yesno).
+# Explicitly binds stdin and stdout to /dev/tty so whiptail always has
+# direct terminal access, even if the calling script has redirected its
+# own file descriptors (e.g., inside a pipe or log capture).
+#
+# Arguments:
+#   All arguments are passed through to whiptail unchanged.
+#
+# Returns:
+#   whiptail's exit code (0 = OK/Yes, 1 = Cancel/No, 255 = ESC)
+_whiptail_display() {
+    # </dev/tty  = read keyboard input from the real terminal
+    # >/dev/tty  = draw the UI to the real terminal
+    whiptail "$@" </dev/tty >/dev/tty
+}
+
+# Run a whiptail dialog that produces a selection (--menu, --radiolist).
+# Captures the user's choice into the TUI_RESULT global variable via a
+# temp file, avoiding the fragile "3>&1 1>&2 2>&3" fd-swap idiom.
+#
+# Why not fd-swap? The traditional approach swaps stdout and stderr so
+# command substitution captures the selection. This breaks when the
+# parent script redirects stderr (logging) or when whiptail runs inside
+# a subshell with inherited fd state. Using a temp file is simpler and
+# works reliably in all contexts.
+#
+# Arguments:
+#   All arguments are passed through to whiptail unchanged.
+#
+# Returns:
+#   whiptail's exit code (0 = selection made, 1 = Cancel, 255 = ESC)
+#
+# Side effects:
+#   - Sets TUI_RESULT to the selected tag (on success) or "" (on cancel)
+#   - Creates and removes a temp file in /tmp
+_whiptail_capture() {
+    TUI_RESULT=""
+
+    # mktemp creates a unique temp file securely (no race conditions).
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    # whiptail writes its UI to stdout and the user's selection to stderr.
+    # Redirect stderr → temp file to capture the selection.
+    # stdin/stdout → /dev/tty so drawing and keyboard input use the terminal.
+    if whiptail "$@" 2>"$tmpfile" </dev/tty >/dev/tty; then
+        TUI_RESULT=$(cat "$tmpfile")
+        rm -f "$tmpfile"
+        return 0
+    else
+        local rc=$?
+        rm -f "$tmpfile"
+        return $rc
+    fi
+}
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -84,6 +157,7 @@ setup_tui_colors() {
 #   1 if whiptail is missing or terminal is too small
 #
 # Side effects:
+#   - Sets TERM_COLS and TERM_LINES globals
 #   - Prints error messages to stderr on failure
 check_tui_deps() {
     # command -v checks if a command exists in PATH without executing it
@@ -124,7 +198,7 @@ show_welcome_screen() {
     (( dlg_h > 14 )) && dlg_h=14
     (( dlg_w > 58 )) && dlg_w=58
 
-    whiptail \
+    _whiptail_display \
         --title "NVIDIA MIG Configuration Tool" \
         --msgbox "Welcome to the MIG Configuration Tool
 
@@ -143,11 +217,11 @@ Press OK to continue." \
 # selections. Provides APPLY and QUIT options at the bottom.
 #
 # Returns:
-#   0 on selection (writes chosen tag to stdout via fd 3)
+#   0 on selection (result stored in TUI_RESULT)
 #   non-zero on Cancel/ESC
 #
 # Side effects:
-#   - Outputs the selected menu tag to file descriptor 3
+#   - Sets TUI_RESULT to the selected menu tag (e.g., "GPU-0", "APPLY")
 show_main_menu() {
     local menu_items=()
     local i
@@ -181,19 +255,11 @@ show_main_menu() {
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
-    # whiptail --menu presents a scrollable list of tagged items.
-    # 3>&1 1>&2 2>&3 swaps stdout and stderr so whiptail's selection
-    # (normally written to stderr) goes to stdout for command substitution.
-    # The "3>&1 1>&2 2>&3" idiom:
-    #   3>&1 = save original stdout to fd 3
-    #   1>&2 = redirect stdout to stderr (whiptail writes UI to stdout)
-    #   2>&3 = redirect stderr to original stdout (captures whiptail's output)
-    whiptail \
+    _whiptail_capture \
         --title "MIG Configuration - GPU Selection" \
         --menu "Select a GPU to change its profile, or APPLY:" \
         "$dlg_h" "$dlg_w" "$menu_height" \
-        "${menu_items[@]}" \
-        3>&1 1>&2 2>&3
+        "${menu_items[@]}"
 }
 
 # Display a radio list of all available MIG profiles for a specific GPU.
@@ -203,11 +269,11 @@ show_main_menu() {
 #   $1 - gpu_idx: The GPU index (0-based) being configured
 #
 # Returns:
-#   0 on selection (writes chosen profile index to stdout via fd 3)
+#   0 on selection (result stored in TUI_RESULT)
 #   non-zero on Cancel/ESC (no change)
 #
 # Side effects:
-#   - Outputs the selected profile index to stdout via fd swap
+#   - Sets TUI_RESULT to the selected profile index
 show_profile_picker() {
     local gpu_idx="$1"
     local current_selection="${GPU_SELECTIONS[$gpu_idx]}"
@@ -233,7 +299,7 @@ show_profile_picker() {
     (( list_height > 14 )) && list_height=14
 
     # Cap dialog dimensions to terminal size minus margin.
-    # 9 extra rows = title + border + prompt text (3 lines) + button row + padding.
+    # 9 extra rows = title + border + prompt text + button row + padding.
     local dlg_h=$((list_height + 9))
     local dlg_w=$((TERM_COLS - 4))
 
@@ -244,14 +310,11 @@ show_profile_picker() {
     local max_list=$((dlg_h - 8))
     (( list_height > max_list )) && list_height=$max_list
 
-    # whiptail --radiolist shows a single-select list with ON/OFF toggles.
-    # Items are: tag description status (repeated for each item).
-    whiptail \
+    _whiptail_capture \
         --title "Select MIG Profile for GPU-${gpu_idx}" \
         --radiolist "SPACE to select, ENTER to confirm:" \
         "$dlg_h" "$dlg_w" "$list_height" \
-        "${radio_items[@]}" \
-        3>&1 1>&2 2>&3
+        "${radio_items[@]}"
 }
 
 # Display a confirmation dialog showing the full GPU→profile assignment
@@ -292,9 +355,7 @@ show_confirmation() {
     (( dlg_h > TERM_LINES - 2 )) && dlg_h=$((TERM_LINES - 2))
     (( dlg_w > 54 )) && dlg_w=54
 
-    # whiptail --yesno shows a Yes/No dialog.
-    # --yes-button/--no-button customize the button labels.
-    whiptail \
+    _whiptail_display \
         --title "Confirm MIG Configuration" \
         --yesno "$formatted" \
         "$dlg_h" "$dlg_w" \
@@ -328,14 +389,17 @@ run_tui() {
 
     # Hub-and-spoke navigation loop
     while true; do
-        local choice
-        choice=$(show_main_menu) || {
+
+        if ! show_main_menu; then
             # Cancel/ESC on main menu → confirm exit
-            if whiptail --title "Exit" --yesno "Exit without making changes?" 8 44; then
+            if _whiptail_display --title "Exit" --yesno \
+                    "Exit without making changes?" 8 44; then
                 return 1
             fi
             continue
-        }
+        fi
+
+        local choice="$TUI_RESULT"
 
         case "$choice" in
             GPU-*)
@@ -343,16 +407,13 @@ run_tui() {
                 # ${choice#GPU-} removes the "GPU-" prefix, leaving just N.
                 local gpu_idx="${choice#GPU-}"
 
-                local new_profile
-                new_profile=$(show_profile_picker "$gpu_idx") || {
-                    # Cancel on profile picker → return to hub unchanged
-                    continue
-                }
-
-                # Validate that the selection is not empty
-                if [[ -n "$new_profile" ]]; then
-                    GPU_SELECTIONS[$gpu_idx]="$new_profile"
+                if show_profile_picker "$gpu_idx"; then
+                    # Validate that the selection is not empty
+                    if [[ -n "$TUI_RESULT" ]]; then
+                        GPU_SELECTIONS[$gpu_idx]="$TUI_RESULT"
+                    fi
                 fi
+                # Cancel on profile picker → return to hub unchanged
                 ;;
 
             "APPLY")
@@ -363,7 +424,8 @@ run_tui() {
                 ;;
 
             "QUIT")
-                if whiptail --title "Exit" --yesno "Exit without making changes?" 8 44; then
+                if _whiptail_display --title "Exit" --yesno \
+                        "Exit without making changes?" 8 44; then
                     return 1
                 fi
                 ;;
