@@ -209,7 +209,8 @@ GPU Count  : ${GPU_COUNT}
 Select a MIG profile for each GPU, then
 apply to run the full workflow automatically.
 
-Press OK to continue." \
+Navigation: TAB moves between fields,
+ENTER confirms, ESC cancels." \
         "$dlg_h" "$dlg_w"
 }
 
@@ -255,9 +256,13 @@ show_main_menu() {
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
+    # --ok-button/--cancel-button customize the button labels.
+    # Default whiptail labels (OK/Cancel) are unclear in a menu context.
     _whiptail_capture \
         --title "MIG Configuration - GPU Selection" \
-        --menu "Select a GPU to change its profile, or APPLY:" \
+        --ok-button "Select" \
+        --cancel-button "Exit" \
+        --menu "Arrows=navigate  TAB=buttons  ENTER=confirm" \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}"
 }
@@ -310,9 +315,13 @@ show_profile_picker() {
     local max_list=$((dlg_h - 8))
     (( list_height > max_list )) && list_height=$max_list
 
+    # --ok-button "Select" confirms the choice, --cancel-button "Back"
+    # returns to the main menu without changing the GPU's profile.
     _whiptail_capture \
         --title "Select MIG Profile for GPU-${gpu_idx}" \
-        --radiolist "SPACE to select, ENTER to confirm:" \
+        --ok-button "Select" \
+        --cancel-button "Back" \
+        --radiolist "SPACE=pick  TAB=buttons  ENTER=confirm" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}"
 }
@@ -342,6 +351,7 @@ show_confirmation() {
 
     summary+="\nThis will cordon the node, apply MIG\n"
     summary+="partitions, generate CDI, and uncordon.\n\n"
+    summary+="TAB=switch buttons  ENTER=confirm\n\n"
     summary+="Proceed?"
 
     # printf with %b interprets backslash escapes in the argument
@@ -392,8 +402,9 @@ run_tui() {
 
         if ! show_main_menu; then
             # Cancel/ESC on main menu → confirm exit
-            if _whiptail_display --title "Exit" --yesno \
-                    "Exit without making changes?" 8 44; then
+            if _whiptail_display --title "Exit" \
+                    --yes-button "Exit" --no-button "Back" \
+                    --yesno "Exit without making changes?" 8 44; then
                 return 1
             fi
             continue
@@ -424,8 +435,9 @@ run_tui() {
                 ;;
 
             "QUIT")
-                if _whiptail_display --title "Exit" --yesno \
-                        "Exit without making changes?" 8 44; then
+                if _whiptail_display --title "Exit" \
+                        --yes-button "Exit" --no-button "Back" \
+                        --yesno "Exit without making changes?" 8 44; then
                     return 1
                 fi
                 ;;
