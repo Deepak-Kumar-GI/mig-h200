@@ -10,9 +10,10 @@
 #                           ↓
 #                      Confirmation (yesno) → proceed / back to hub
 #
-# Capture pattern: dialogs that return a selection (menu, radiolist) store
-# the result in the TUI_RESULT global using a single $() command
-# substitution with the standard 3>&1 1>&2 2>&3 fd-swap idiom.
+# Capture pattern: dialogs that return a selection (menu, radiolist)
+# redirect stderr to a temp file (whiptail writes its selection there)
+# and store the result in the TUI_RESULT global. This avoids the
+# 3>&1 1>&2 2>&3 fd-swap inside $() which breaks under set -euo pipefail.
 # Display-only dialogs (msgbox, yesno) call whiptail directly.
 #
 # Depends on: common/template-parser.sh (profile arrays must be populated)
@@ -194,21 +195,29 @@ show_main_menu() {
     local max_list=$((dlg_h - 7))
     (( menu_height > max_list )) && menu_height=$max_list
 
-    # Capture whiptail's selection using the standard fd-swap idiom:
-    #   3>&1 = save stdout (for command substitution capture) as fd 3
-    #   1>&2 = redirect stdout to stderr (whiptail draws UI here)
-    #   2>&3 = redirect stderr to fd 3 (selection captured by $())
-    # --ok-button/--cancel-button customize the button labels.
-    TUI_RESULT=$(whiptail \
+    # Capture whiptail's selection via a temp file on stderr.
+    # whiptail draws its UI on stdout (terminal) and writes the user's
+    # selection to stderr. Redirecting stderr to a temp file captures the
+    # selection without needing a $() subshell or the 3>&1 1>&2 2>&3 fd-swap
+    # (which can break under set -euo pipefail in some bash versions).
+    local _tmpf
+    _tmpf=$(mktemp)
+
+    whiptail \
         --title "MIG Configuration - GPU Selection" \
         --ok-button "Select" \
         --cancel-button "Exit" \
         --menu "Arrows=navigate  TAB=buttons  ENTER=confirm" \
         "$dlg_h" "$dlg_w" "$menu_height" \
         "${menu_items[@]}" \
-        3>&1 1>&2 2>&3) || return $?
+        2>"$_tmpf"
+    local rc=$?
 
-    return 0
+    # $(<file) reads the file contents without spawning a subprocess (cat).
+    TUI_RESULT=$(<"$_tmpf")
+    rm -f "$_tmpf"
+
+    return $rc
 }
 
 # Display a radio list of all available MIG profiles for a specific GPU.
@@ -259,18 +268,25 @@ show_profile_picker() {
     local max_list=$((dlg_h - 8))
     (( list_height > max_list )) && list_height=$max_list
 
-    # Capture selection with fd-swap (same pattern as show_main_menu).
+    # Capture selection via temp file (same pattern as show_main_menu).
     # --ok-button "Select" confirms, --cancel-button "Back" returns to hub.
-    TUI_RESULT=$(whiptail \
+    local _tmpf
+    _tmpf=$(mktemp)
+
+    whiptail \
         --title "Select MIG Profile for GPU-${gpu_idx}" \
         --ok-button "Select" \
         --cancel-button "Back" \
         --radiolist "SPACE=pick  TAB=buttons  ENTER=confirm" \
         "$dlg_h" "$dlg_w" "$list_height" \
         "${radio_items[@]}" \
-        3>&1 1>&2 2>&3) || return $?
+        2>"$_tmpf"
+    local rc=$?
 
-    return 0
+    TUI_RESULT=$(<"$_tmpf")
+    rm -f "$_tmpf"
+
+    return $rc
 }
 
 # Display a confirmation dialog showing the full GPU→profile assignment
