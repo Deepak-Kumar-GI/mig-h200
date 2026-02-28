@@ -90,8 +90,8 @@ _whiptail_capture() {
 # NEWT_COLORS is a newt library feature (whiptail's rendering backend).
 # Each entry sets foreground,background for a UI element.
 #
-# Theme: green borders/titles on black, white text, green active button.
-# Inactive buttons use cyan so the focused (green) button stands out.
+# Theme: green borders/titles on black, white text.
+# Buttons: black-on-green (inactive) vs white-on-green (focused).
 #
 # Side effects:
 #   - Sets the NEWT_COLORS environment variable
@@ -103,8 +103,8 @@ setup_tui_colors() {
         window=white,black
         shadow=,black
         title=green,black
-        button=black,cyan
-        actbutton=black,green
+        button=black,green
+        actbutton=white,green
         checkbox=white,black
         actcheckbox=black,green
         listbox=white,black
