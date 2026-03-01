@@ -48,6 +48,7 @@ source config.sh                   # Global settings (node name, namespaces, ret
 source common/lock.sh              # acquire_lock()
 source common/cdi.sh               # get_current_runtime_mode(), set_runtime_auto(), backup_runtime_config()
 source common/workload-check.sh    # check_gpu_workloads()
+source common/log-cleanup.sh       # cleanup_old_logs()
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
@@ -153,6 +154,9 @@ main() {
 
     # STEP 1: Acquire global lock to prevent concurrent MIG/CDI operations
     acquire_lock "$LOCK_FILE"
+
+    # Prune log directories older than LOG_RETENTION_DAYS (best-effort, non-fatal)
+    cleanup_old_logs "$BASE_LOG_DIR" "$LOG_RETENTION_DAYS" "$RUN_LOG_DIR" || true
 
     log "=============================================================="
     log " NVIDIA GPU Pre-Configuration"

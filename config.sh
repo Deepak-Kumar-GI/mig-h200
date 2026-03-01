@@ -64,6 +64,11 @@ GLOBAL_LOCK_FILE="/var/lock/nvidia-mig-config.lock"
 # Each run creates a subdirectory: logs/YYYYMMDD-HHMMSS/
 BASE_LOG_DIR="logs"
 
+# Number of days to retain log directories before automatic cleanup.
+# Directories older than this (based on the YYYYMMDD in their name) are
+# deleted at the start of each run. Set to 0 to disable cleanup entirely.
+LOG_RETENTION_DAYS=30
+
 # ============================================================================
 # MIG STATE POLLING
 # ============================================================================

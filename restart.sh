@@ -29,6 +29,7 @@ source config.sh
 source common/lock.sh
 source common/cdi.sh
 source common/workload-check.sh
+source common/log-cleanup.sh
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
@@ -51,6 +52,9 @@ verify_containerd() {
 main() {
 
     acquire_lock "$LOCK_FILE"
+
+    # Prune log directories older than LOG_RETENTION_DAYS (best-effort, non-fatal)
+    cleanup_old_logs "$BASE_LOG_DIR" "$LOG_RETENTION_DAYS" "$RUN_LOG_DIR" || true
 
     if [[ "${CDI_ENABLED}" != "true" ]]; then
         log "CDI is disabled (CDI_ENABLED=false). Runtime mode restore is not needed."

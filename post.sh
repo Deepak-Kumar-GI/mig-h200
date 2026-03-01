@@ -53,6 +53,7 @@ trap 'echo "[ERROR] Script failed at ${BASH_SOURCE}:${LINENO}"; exit 1' ERR
 source config.sh
 source common/lock.sh
 source common/cdi.sh
+source common/log-cleanup.sh
 
 LOCK_FILE="$GLOBAL_LOCK_FILE"
 
@@ -282,6 +283,9 @@ main() {
 
     # Step 1: Acquire global lock to prevent concurrent MIG/CDI operations
     acquire_lock "$LOCK_FILE"
+
+    # Prune log directories older than LOG_RETENTION_DAYS (best-effort, non-fatal)
+    cleanup_old_logs "$BASE_LOG_DIR" "$LOG_RETENTION_DAYS" "$RUN_LOG_DIR" || true
 
     log "=============================================================="
     log " NVIDIA GPU Post-Configuration"
