@@ -1,141 +1,214 @@
 #!/bin/bash
+# ============================================================================
+# NVIDIA GPU Pre-Configuration Script
+# ============================================================================
+# Prepare the worker node safely before NVIDIA MIG reprovisioning.
+#
+# This is the FIRST script in the reprovisioning workflow (pre.sh → post.sh).
+# It creates backups of all GPU-related configurations, validates that no
+# GPU workloads are running, optionally switches the runtime to AUTO mode
+# (when CDI_ENABLED=true) so the MIG Manager can freely reconfigure
+# partitions, and cordons the node to prevent new pods from being scheduled
+# during reconfiguration.
+#
+# CDI/runtime operations (steps 5, 7) are controlled by the CDI_ENABLED
+# flag in config.sh. When CDI_ENABLED=false, the script skips runtime
+# backup and the AUTO mode switch.
+#
+# WHAT THIS SCRIPT DOES (STEP-BY-STEP)
+# ------------------------------------
+#   STEP 1  : Acquire global execution lock
+#   STEP 2  : Backup ClusterPolicy
+#   STEP 3  : Backup MIG ConfigMap (if configured)
+#   STEP 4  : Backup MIG-related node labels
+#   STEP 5  : Backup NVIDIA runtime configuration   (CDI_ENABLED only)
+#   STEP 6  : Check active GPU workloads
+#   STEP 7  : Detect runtime mode and switch to AUTO (CDI_ENABLED only)
+#   STEP 8  : Cordon worker node
+#
+# Author: GRIL Team <support.ai@giindia.com>
+# Organization: Global Infoventures
+# Date: 2026-02-26
+# ============================================================================
 
-# ==============================================================
-# NVIDIA GPU Pre-Configuration Utility with Timestamped Logs
-# ==============================================================
-
+# set -e   → exit immediately on any command failure
+# set -u   → treat unset variables as errors
+# set -o pipefail → pipeline fails if any command in it fails (not just the last)
 set -euo pipefail
-trap 'echo "[ERROR] Script failed at line $LINENO."; exit 1' ERR
 
-# --------------------------------------------------------------
-# Global Lock (Prevents concurrent pre/post execution)
-# --------------------------------------------------------------
-LOCK_FILE="/var/lock/nvidia-mig-config.lock"
-exec 200>"$LOCK_FILE"
+# trap catches any ERR signal (command failure) and prints the failing line number
+# before exiting, aiding debugging in non-interactive execution.
+trap 'echo "[ERROR] Script failed at ${BASH_SOURCE}:${LINENO}"; exit 1' ERR
 
-if ! flock -n 200; then
-    echo "[ERROR] Another MIG configuration script is already running."
-    echo "Only one of pre.sh or post.sh can run at a time."
-    exit 1
-fi
+# ============================================================================
+# LOAD SHARED CONFIGURATION & UTILITIES
+# ============================================================================
 
-echo $$ 1>&200
+source config.sh                   # Global settings (node name, namespaces, retry params)
+source common/lock.sh              # acquire_lock()
+source common/cdi.sh               # get_current_runtime_mode(), set_runtime_auto(), backup_runtime_config()
+source common/workload-check.sh    # check_gpu_workloads()
+source common/log-cleanup.sh       # cleanup_old_logs()
 
-# --------------------------------------------------------------
-# Node & Namespace
-# --------------------------------------------------------------
-WORKER_NODE="gu-k8s-worker"
-GPU_OPERATOR_NAMESPACE="gpu-operator"
-TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+LOCK_FILE="$GLOBAL_LOCK_FILE"
 
-# --------------------------------------------------------------
-# Logs & Backup Setup (Timestamped folder)
-# --------------------------------------------------------------
-BASE_LOG_DIR="logs"
-TIMESTAMP_FOLDER=$(date +%Y%m%d-%H%M%S)
-RUN_LOG_DIR="${BASE_LOG_DIR}/${TIMESTAMP_FOLDER}"
+# ============================================================================
+# RUNTIME DIRECTORIES
+# ============================================================================
+
+# Each run creates a timestamped directory for logs and backups.
+# Format: logs/YYYYMMDD-HHMMSS/
+RUN_LOG_DIR="${BASE_LOG_DIR}/$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${RUN_LOG_DIR}/backup"
-
-mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
-
 log_file="${RUN_LOG_DIR}/pre.log"
 
-log() { echo "[$(date +"%H:%M:%S")] [INFO] $1" | tee -a "$log_file"; }
-warn() { echo "[$(date +"%H:%M:%S")] [WARN] $1" | tee -a "$log_file"; }
-error() { echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
+# -p creates parent directories if they don't exist; no error if already present
+mkdir -p "$RUN_LOG_DIR" "$BACKUP_DIR"
 
-# --------------------------------------------------------------
-# Script Start
-# --------------------------------------------------------------
-log "=============================================================="
-log " NVIDIA GPU Pre-Configuration"
-log " Node        : ${WORKER_NODE}"
-log " Started At  : ${TIMESTAMP}"
-log " Run Folder  : ${RUN_LOG_DIR}"
-log "=============================================================="
+# ============================================================================
+# LOGGING FUNCTIONS
+# ============================================================================
 
-# --------------------------------------------------------------
-# Kubernetes Backups
-# --------------------------------------------------------------
-log "Backing up ClusterPolicy to ${BACKUP_DIR}..."
-kubectl get clusterpolicies.nvidia.com/cluster-policy -o yaml \
-    > "${BACKUP_DIR}/cluster-policy.yaml"
+# tee -a writes to both stdout (console) and appends to the log file,
+# so the operator sees output in real time while it's also persisted.
+log()  { echo "[$(date +"%H:%M:%S")] [INFO]  $1" | tee -a "$log_file"; }
+warn() { echo "[$(date +"%H:%M:%S")] [WARN]  $1" | tee -a "$log_file"; }
+error(){ echo "[$(date +"%H:%M:%S")] [ERROR] $1" | tee -a "$log_file"; }
 
-# Backup MIG ConfigMap if exists
-MIG_CONFIGMAP=$(kubectl get clusterpolicies.nvidia.com/cluster-policy \
-  -o jsonpath='{.spec.migManager.config.name}' 2>/dev/null || true)
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
 
-if [[ -n "${MIG_CONFIGMAP}" ]]; then
-    log "MIG ConfigMap detected: ${MIG_CONFIGMAP}"
-    kubectl get configmap "${MIG_CONFIGMAP}" \
-        -n "${GPU_OPERATOR_NAMESPACE}" -o yaml \
-        > "${BACKUP_DIR}/mig-configmap.yaml"
-else
-    warn "No MIG ConfigMap configured."
-fi
+# Backup the ClusterPolicy custom resource from the NVIDIA GPU Operator.
+# The ClusterPolicy defines the GPU Operator's overall configuration
+# (driver, toolkit, MIG manager settings, etc.).
+#
+# Side effects:
+#   - Creates ${BACKUP_DIR}/cluster-policy.yaml
+backup_cluster_policy() {
+    log "Backing up ClusterPolicy..."
+    # -o yaml exports the full resource definition for later restoration
+    kubectl get clusterpolicies.nvidia.com/cluster-policy -o yaml \
+        > "${BACKUP_DIR}/cluster-policy.yaml"
+}
 
-# Record current MIG node labels
-kubectl get nodes -l nvidia.com/mig.config \
-    -o=custom-columns=NODE:.metadata.name,MIG_CONFIG:.metadata.labels."nvidia\.com/mig\.config" \
-    > "${BACKUP_DIR}/node-mig-labels.txt" || true
+# Backup the MIG ConfigMap referenced by the ClusterPolicy (if one is configured).
+# The MIG ConfigMap defines which MIG partition profiles are available.
+#
+# Side effects:
+#   - Creates ${BACKUP_DIR}/mig-configmap.yaml if a ConfigMap is found
+#   - Logs a warning if no MIG ConfigMap is configured
+backup_mig_configmap() {
+    local mig_configmap
 
-# --------------------------------------------------------------
-# Backup NVIDIA Runtime Config (REMOTE FILE → LOCAL BACKUP_DIR)
-# --------------------------------------------------------------
-log "Backing up NVIDIA container runtime config from ${WORKER_NODE}..."
+    # jsonpath extracts the ConfigMap name from the ClusterPolicy spec.
+    # 2>/dev/null suppresses errors if the field doesn't exist.
+    # || true prevents set -e from aborting when the field is missing.
+    mig_configmap=$(kubectl get clusterpolicies.nvidia.com/cluster-policy \
+        -o jsonpath='{.spec.migManager.config.name}' 2>/dev/null || true)
 
-RUNTIME_BACKUP_FILE="${BACKUP_DIR}/config.toml.bak.$(date +%s)"
+    # -n checks if the string is non-empty (ConfigMap name was found)
+    if [[ -n "$mig_configmap" ]]; then
+        log "Backing up MIG ConfigMap: $mig_configmap"
+        kubectl get configmap "$mig_configmap" \
+            -n "$GPU_OPERATOR_NAMESPACE" -o yaml \
+            > "${BACKUP_DIR}/mig-configmap.yaml"
+    else
+        warn "No MIG ConfigMap configured in ClusterPolicy."
+    fi
+}
 
-scp "${WORKER_NODE}:/etc/nvidia-container-runtime/config.toml" \
-    "${RUNTIME_BACKUP_FILE}" >> "$log_file" 2>&1 \
-    || { error "Failed to backup runtime config."; exit 1; }
+# Backup the MIG-related node labels to a text file.
+# These labels (e.g., nvidia.com/mig.config) track which MIG profile
+# is currently applied to each node. Preserving them allows comparison
+# after reconfiguration.
+#
+# Side effects:
+#   - Creates ${BACKUP_DIR}/node-mig-labels.txt
+backup_node_labels() {
+    log "Recording current MIG node labels..."
+    # -l filters nodes that have the nvidia.com/mig.config label.
+    # -o=custom-columns outputs only the node name and its MIG config label value.
+    kubectl get nodes -l nvidia.com/mig.config \
+        -o=custom-columns=NODE:.metadata.name,MIG_CONFIG:.metadata.labels."nvidia\.com/mig\.config" \
+        > "${BACKUP_DIR}/node-mig-labels.txt"
+}
 
-log "Runtime config backup stored at: ${RUNTIME_BACKUP_FILE}"
+# Cordon the worker node to prevent Kubernetes from scheduling new pods on it
+# during MIG reconfiguration.
+#
+# || true prevents failure if the node is already cordoned.
+#
+# Side effects:
+#   - Node is marked as SchedulingDisabled in Kubernetes
+cordon_node() {
+    log "Cordoning node ${WORKER_NODE}..."
+    kubectl cordon "$WORKER_NODE" >> "$log_file" 2>&1 || true
+}
 
-log "Backup phase completed successfully."
+# ============================================================================
+# MAIN LOGIC
+# ============================================================================
 
-# --------------------------------------------------------------
-# Runtime Configuration
-# --------------------------------------------------------------
-log "Checking NVIDIA runtime mode on ${WORKER_NODE}..."
+main() {
 
-CURRENT_MODE=$(ssh "${WORKER_NODE}" \
-  "grep '^mode' /etc/nvidia-container-runtime/config.toml | awk -F'\"' '{print \$2}'" \
-  || true)
+    # STEP 1: Acquire global lock to prevent concurrent MIG/CDI operations
+    acquire_lock "$LOCK_FILE"
 
-if [[ -z "${CURRENT_MODE}" ]]; then
-    warn "Unable to determine current runtime mode."
-else
-    log "Current runtime mode: ${CURRENT_MODE}"
-fi
+    # Prune log directories older than LOG_RETENTION_DAYS (best-effort, non-fatal)
+    cleanup_old_logs "$BASE_LOG_DIR" "$LOG_RETENTION_DAYS" "$RUN_LOG_DIR" || true
 
-if [[ "${CURRENT_MODE}" != "auto" ]]; then
-    log "Switching runtime mode to AUTO..."
-    ssh "${WORKER_NODE}" \
-        "sudo sed -i 's/mode = \"cdi\"/mode = \"auto\"/' \
-        /etc/nvidia-container-runtime/config.toml" \
-        >> "$log_file" 2>&1
+    log "=============================================================="
+    log " NVIDIA GPU Pre-Configuration"
+    log " Node        : ${WORKER_NODE}"
+    log " Started At  : $(date +"%Y-%m-%d %H:%M:%S")"
+    log " Run Folder  : ${RUN_LOG_DIR}"
+    log "=============================================================="
 
-    ssh "${WORKER_NODE}" \
-        "sudo systemctl restart containerd" \
-        >> "$log_file" 2>&1
+    # STEP 2: Backup ClusterPolicy (GPU Operator configuration)
+    backup_cluster_policy
 
-    log "Runtime successfully switched to AUTO."
-else
-    log "Runtime already set to AUTO. No action required."
-fi
+    # STEP 3: Backup MIG ConfigMap (partition profile definitions)
+    backup_mig_configmap
 
-# --------------------------------------------------------------
-# Cordon Node
-# --------------------------------------------------------------
-log "Cordoning node ${WORKER_NODE}..."
-kubectl cordon "${WORKER_NODE}" >> "$log_file" 2>&1 || true
-log "Now no workload can schedule on ${WORKER_NODE} node."
+    # STEP 4: Backup MIG node labels (current partition state)
+    backup_node_labels
 
-log "--------------------------------------------------------------"
-log " PRE-CONFIGURATION COMPLETED SUCCESSFULLY"
-log " Backup Location : ${BACKUP_DIR}"
-log " Log File        : ${log_file}"
-log "--------------------------------------------------------------"
-log "ACTION REQUIRED:"
-log "Stop all GPU workloads on ${WORKER_NODE} before proceeding with MIG reconfiguration."
+    # STEP 5 & 7: CDI/runtime operations (only when CDI is enabled)
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # STEP 5: Backup NVIDIA runtime config (config.toml from worker node)
+        backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$log_file"
+    fi
+
+    # STEP 6: Abort if GPU workloads (dgx-* pods) are still running
+    check_gpu_workloads "$WORKER_NODE"
+
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # STEP 7: Detect runtime mode and switch to AUTO if needed
+        log "Checking current NVIDIA runtime mode..."
+        current_mode=$(get_current_runtime_mode "$WORKER_NODE")
+
+        if [[ "$current_mode" == "auto" ]]; then
+            log "Runtime already in AUTO mode. No change required."
+        else
+            log "Current Runtime Mode : ${current_mode}"
+            log "Target  Runtime Mode : auto"
+            log "Switching runtime mode to AUTO..."
+            set_runtime_auto "$WORKER_NODE" "$log_file"
+            log "Runtime mode successfully changed to AUTO."
+        fi
+    else
+        log "CDI is disabled (CDI_ENABLED=false). Skipping runtime backup and AUTO switch."
+    fi
+
+    # STEP 8: Cordon node to block new pod scheduling during reconfiguration
+    cordon_node
+
+    log "--------------------------------------------------------------"
+    log " PRE-CONFIGURATION COMPLETED SUCCESSFULLY"
+    log " Backup Location : ${BACKUP_DIR}"
+    log " Log File        : ${log_file}"
+    log "--------------------------------------------------------------"
+}
+
+main "$@"
