@@ -177,9 +177,11 @@ wait_for_mig_state() {
     local failed_count=0
 
     while true; do
-        # Global timeout — checked first so unexpected/empty states can't loop forever
-        if [[ $count -ge $MAX_RETRIES ]]; then
-            error "Timeout waiting for MIG success after ${count} attempts."
+        # Global timeout: allow exactly MAX_RETRIES polls.
+        # With count starting at 1, attempts 1..MAX_RETRIES are executed;
+        # timeout triggers only on the next loop (count = MAX_RETRIES + 1).
+        if [[ $count -gt $MAX_RETRIES ]]; then
+            error "Timeout waiting for MIG success after ${MAX_RETRIES} attempts."
             return 1
         fi
 
