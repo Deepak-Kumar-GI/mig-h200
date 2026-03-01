@@ -7,13 +7,18 @@
 # -------
 # Switch NVIDIA container runtime from AUTO → CDI.
 #
+# Requires CDI_ENABLED=true in config.sh. When CDI is disabled,
+# the script exits immediately with a log message — there is
+# no runtime mode to restore.
+#
 # WHAT THIS SCRIPT DOES (STEP-BY-STEP)
 # ------------------------------------
 #   STEP 1  : Acquire global execution lock
-#   STEP 2  : Backup NVIDIA container runtime configuration
-#   STEP 3  : Detect current runtime mode
-#   STEP 4  : Switch runtime mode → CDI (if required)
-#   STEP 5  : Verify containerd service
+#   STEP 2  : Exit early if CDI_ENABLED=false
+#   STEP 3  : Backup NVIDIA container runtime configuration
+#   STEP 4  : Detect current runtime mode
+#   STEP 5  : Switch runtime mode → CDI (if required)
+#   STEP 6  : Verify containerd service
 #
 # ==============================================================
 
@@ -46,6 +51,11 @@ verify_containerd() {
 main() {
 
     acquire_lock "$LOCK_FILE"
+
+    if [[ "${CDI_ENABLED}" != "true" ]]; then
+        log "CDI is disabled (CDI_ENABLED=false). Runtime mode restore is not needed."
+        exit 0
+    fi
 
     log "=============================================================="
     log " NVIDIA Runtime Mode Switch (AUTO → CDI)"

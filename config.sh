@@ -36,6 +36,19 @@ MIG_CONFIG_FILE="custom-mig-config.yaml"
 MIG_TEMPLATE_FILE="custom-mig-config-template.yaml"
 
 # ============================================================================
+# CDI / RUNTIME
+# ============================================================================
+
+# Whether to enable CDI (Container Device Interface) operations.
+# When true: the toolkit backs up runtime config, switches to AUTO mode
+# (pre-phase), generates CDI specs, and switches to CDI mode (post-phase).
+# When false: all CDI/runtime-mode operations are skipped entirely.
+# restart.sh becomes a no-op.
+#
+# Set to false if your environment does not use CDI for GPU device exposure.
+CDI_ENABLED=true
+
+# ============================================================================
 # GLOBAL LOCK
 # ============================================================================
 

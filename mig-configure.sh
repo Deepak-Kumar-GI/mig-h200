@@ -7,9 +7,13 @@
 # partition profiles for each GPU, then the tool automatically:
 #   1. Generates a Kubernetes ConfigMap from the selections
 #   2. Backs up current cluster state (pre-phase)
-#   3. Switches runtime to AUTO, cordons the node
+#   3. Optionally switches runtime to AUTO, cordons the node
 #   4. Applies the MIG configuration with retry + label cycling (post-phase)
-#   5. Validates GPU state, generates CDI, switches to CDI, uncordons
+#   5. Validates GPU state, optionally generates CDI / switches to CDI, uncordons
+#
+# CDI/runtime operations are controlled by the CDI_ENABLED flag in config.sh.
+# When CDI_ENABLED=false, runtime backup, AUTO/CDI mode switches, and CDI
+# generation are all skipped.
 #
 # This eliminates the manual YAML editing step and the need to run
 # pre.sh and post.sh separately.
@@ -418,11 +422,12 @@ EOF
 # ============================================================================
 
 # Execute all pre-configuration steps: backup cluster state, check for
-# active workloads, switch runtime to AUTO, and cordon the node.
+# active workloads, optionally switch runtime to AUTO (when CDI_ENABLED=true),
+# and cordon the node.
 #
 # Side effects:
 #   - Creates backup files in BACKUP_DIR
-#   - Switches runtime to AUTO mode on the worker node
+#   - Switches runtime to AUTO mode on the worker node (CDI_ENABLED only)
 #   - Cordons the worker node
 run_pre_phase() {
     log "=============================================================="
@@ -438,25 +443,32 @@ run_pre_phase() {
     # Step 3: Backup MIG node labels (current partition state)
     backup_node_labels
 
-    # Step 4: Backup NVIDIA runtime config (config.toml from worker node)
-    backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$LOG_FILE"
+    # Steps 4 & 6: CDI/runtime operations (only when CDI is enabled)
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # Step 4: Backup NVIDIA runtime config (config.toml from worker node)
+        backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$LOG_FILE"
+    fi
 
     # Step 5: Abort if GPU workloads (dgx-* pods) are still running
     check_gpu_workloads "$WORKER_NODE"
 
-    # Step 6: Detect runtime mode and switch to AUTO if needed
-    log "Checking current NVIDIA runtime mode..."
-    local current_mode
-    current_mode=$(get_current_runtime_mode "$WORKER_NODE")
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # Step 6: Detect runtime mode and switch to AUTO if needed
+        log "Checking current NVIDIA runtime mode..."
+        local current_mode
+        current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
-    if [[ "$current_mode" == "auto" ]]; then
-        log "Runtime already in AUTO mode. No change required."
+        if [[ "$current_mode" == "auto" ]]; then
+            log "Runtime already in AUTO mode. No change required."
+        else
+            log "Current Runtime Mode : ${current_mode}"
+            log "Target  Runtime Mode : auto"
+            log "Switching runtime mode to AUTO..."
+            set_runtime_auto "$WORKER_NODE" "$LOG_FILE"
+            log "Runtime mode successfully changed to AUTO."
+        fi
     else
-        log "Current Runtime Mode : ${current_mode}"
-        log "Target  Runtime Mode : auto"
-        log "Switching runtime mode to AUTO..."
-        set_runtime_auto "$WORKER_NODE" "$LOG_FILE"
-        log "Runtime mode successfully changed to AUTO."
+        log "CDI is disabled (CDI_ENABLED=false). Skipping runtime backup and AUTO switch."
     fi
 
     # Step 7: Cordon node to block new pod scheduling during reconfiguration
@@ -466,12 +478,13 @@ run_pre_phase() {
 }
 
 # Execute all post-configuration steps: apply MIG config, validate,
-# generate CDI, switch to CDI, verify containerd, and uncordon.
+# optionally generate CDI and switch to CDI (when CDI_ENABLED=true),
+# verify containerd, and uncordon.
 #
 # Side effects:
 #   - Applies MIG ConfigMap and cycles node labels
-#   - Generates CDI specification on the worker node
-#   - Switches runtime to CDI mode
+#   - Generates CDI specification on the worker node (CDI_ENABLED only)
+#   - Switches runtime to CDI mode (CDI_ENABLED only)
 #   - Uncordons the worker node
 run_post_phase() {
     log "=============================================================="
@@ -484,23 +497,28 @@ run_post_phase() {
     # Step 2: Validate GPU partition state via nvidia-smi
     run_nvidia_smi
 
-    # Step 3: Generate CDI specification on the worker node
-    log "Generating CDI specification..."
-    generate_cdi "$WORKER_NODE" "$LOG_FILE"
+    # Steps 3–4: CDI operations (only when CDI is enabled)
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # Step 3: Generate CDI specification on the worker node
+        log "Generating CDI specification..."
+        generate_cdi "$WORKER_NODE" "$LOG_FILE"
 
-    # Step 4: Detect current runtime mode and switch to CDI if needed
-    log "Checking current NVIDIA runtime mode..."
-    local current_mode
-    current_mode=$(get_current_runtime_mode "$WORKER_NODE")
+        # Step 4: Detect current runtime mode and switch to CDI if needed
+        log "Checking current NVIDIA runtime mode..."
+        local current_mode
+        current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
-    if [[ "$current_mode" == "cdi" ]]; then
-        log "Runtime already in CDI mode."
+        if [[ "$current_mode" == "cdi" ]]; then
+            log "Runtime already in CDI mode."
+        else
+            log "Current Runtime Mode : ${current_mode}"
+            log "Target  Runtime Mode : cdi"
+            log "Switching runtime mode to CDI..."
+            switch_runtime_to_cdi "$WORKER_NODE" "$LOG_FILE"
+            log "Runtime mode successfully changed to CDI."
+        fi
     else
-        log "Current Runtime Mode : ${current_mode}"
-        log "Target  Runtime Mode : cdi"
-        log "Switching runtime mode to CDI..."
-        switch_runtime_to_cdi "$WORKER_NODE" "$LOG_FILE"
-        log "Runtime mode successfully changed to CDI."
+        log "CDI is disabled (CDI_ENABLED=false). Skipping CDI generation and runtime switch."
     fi
 
     # Step 5: Verify containerd is running before uncordoning

@@ -6,9 +6,14 @@
 #
 # This is the FIRST script in the reprovisioning workflow (pre.sh → post.sh).
 # It creates backups of all GPU-related configurations, validates that no
-# GPU workloads are running, switches the runtime to AUTO mode so the
-# MIG Manager can freely reconfigure partitions, and cordons the node
-# to prevent new pods from being scheduled during reconfiguration.
+# GPU workloads are running, optionally switches the runtime to AUTO mode
+# (when CDI_ENABLED=true) so the MIG Manager can freely reconfigure
+# partitions, and cordons the node to prevent new pods from being scheduled
+# during reconfiguration.
+#
+# CDI/runtime operations (steps 5, 7) are controlled by the CDI_ENABLED
+# flag in config.sh. When CDI_ENABLED=false, the script skips runtime
+# backup and the AUTO mode switch.
 #
 # WHAT THIS SCRIPT DOES (STEP-BY-STEP)
 # ------------------------------------
@@ -16,9 +21,9 @@
 #   STEP 2  : Backup ClusterPolicy
 #   STEP 3  : Backup MIG ConfigMap (if configured)
 #   STEP 4  : Backup MIG-related node labels
-#   STEP 5  : Backup NVIDIA runtime configuration
+#   STEP 5  : Backup NVIDIA runtime configuration   (CDI_ENABLED only)
 #   STEP 6  : Check active GPU workloads
-#   STEP 7  : Detect current NVIDIA runtime mode and switch to AUTO
+#   STEP 7  : Detect runtime mode and switch to AUTO (CDI_ENABLED only)
 #   STEP 8  : Cordon worker node
 #
 # Author: GRIL Team <support.ai@giindia.com>
@@ -165,24 +170,31 @@ main() {
     # STEP 4: Backup MIG node labels (current partition state)
     backup_node_labels
 
-    # STEP 5: Backup NVIDIA runtime config (config.toml from worker node)
-    backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$log_file"
+    # STEP 5 & 7: CDI/runtime operations (only when CDI is enabled)
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # STEP 5: Backup NVIDIA runtime config (config.toml from worker node)
+        backup_runtime_config "$WORKER_NODE" "$BACKUP_DIR" "$log_file"
+    fi
 
     # STEP 6: Abort if GPU workloads (dgx-* pods) are still running
     check_gpu_workloads "$WORKER_NODE"
 
-    # STEP 7: Detect runtime mode and switch to AUTO if needed
-    log "Checking current NVIDIA runtime mode..."
-    current_mode=$(get_current_runtime_mode "$WORKER_NODE")
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # STEP 7: Detect runtime mode and switch to AUTO if needed
+        log "Checking current NVIDIA runtime mode..."
+        current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
-    if [[ "$current_mode" == "auto" ]]; then
-        log "Runtime already in AUTO mode. No change required."
+        if [[ "$current_mode" == "auto" ]]; then
+            log "Runtime already in AUTO mode. No change required."
+        else
+            log "Current Runtime Mode : ${current_mode}"
+            log "Target  Runtime Mode : auto"
+            log "Switching runtime mode to AUTO..."
+            set_runtime_auto "$WORKER_NODE" "$log_file"
+            log "Runtime mode successfully changed to AUTO."
+        fi
     else
-        log "Current Runtime Mode : ${current_mode}"
-        log "Target  Runtime Mode : auto"
-        log "Switching runtime mode to AUTO..."
-        set_runtime_auto "$WORKER_NODE" "$log_file"
-        log "Runtime mode successfully changed to AUTO."
+        log "CDI is disabled (CDI_ENABLED=false). Skipping runtime backup and AUTO switch."
     fi
 
     # STEP 8: Cordon node to block new pod scheduling during reconfiguration

@@ -3,18 +3,22 @@
 # NVIDIA GPU Post-Configuration Script
 # ============================================================================
 # Applies the MIG partition configuration to the worker node and completes
-# post-reprovisioning setup (CDI generation, runtime switch, uncordon).
+# post-reprovisioning setup (optional CDI generation, runtime switch, uncordon).
 # Run this script AFTER pre.sh has cordoned the node and switched the
 # runtime to AUTO mode, and after the operator has edited the MIG
 # ConfigMap and deleted DGX workloads.
+#
+# CDI operations (steps 5–6) are controlled by the CDI_ENABLED flag in
+# config.sh. When CDI_ENABLED=false, the script skips CDI generation
+# and the CDI runtime switch.
 #
 # Workflow (executed in order):
 #   1. Acquire global execution lock
 #   2. Apply custom MIG configuration YAML (with retry + label cycling)
 #   3. Wait for MIG state to reach SUCCESS (early-success protection)
 #   4. Validate GPU state via nvidia-smi inside the MIG Manager pod
-#   5. Generate CDI specification on the worker node
-#   6. Detect current runtime mode; switch to CDI if needed
+#   5. Generate CDI specification on the worker node   (CDI_ENABLED only)
+#   6. Detect runtime mode; switch to CDI if needed     (CDI_ENABLED only)
 #   7. Verify containerd is running
 #   8. Uncordon the worker node
 #
@@ -292,22 +296,27 @@ main() {
     # Step 3: Validate GPU partition state via nvidia-smi
     run_nvidia_smi
 
-    # Step 4: Generate CDI specification on the worker node
-    log "Generating CDI specification..."
-    generate_cdi "$WORKER_NODE" "$log_file"
+    # Steps 4–5: CDI operations (only when CDI is enabled)
+    if [[ "${CDI_ENABLED}" == "true" ]]; then
+        # Step 4: Generate CDI specification on the worker node
+        log "Generating CDI specification..."
+        generate_cdi "$WORKER_NODE" "$log_file"
 
-    # Step 5: Detect current runtime mode and switch to CDI if needed
-    log "Checking current NVIDIA runtime mode..."
-    current_mode=$(get_current_runtime_mode "$WORKER_NODE")
+        # Step 5: Detect current runtime mode and switch to CDI if needed
+        log "Checking current NVIDIA runtime mode..."
+        current_mode=$(get_current_runtime_mode "$WORKER_NODE")
 
-    if [[ "$current_mode" == "cdi" ]]; then
-        log "Runtime already in CDI mode."
+        if [[ "$current_mode" == "cdi" ]]; then
+            log "Runtime already in CDI mode."
+        else
+            log "Current Runtime Mode : ${current_mode}"
+            log "Target  Runtime Mode : cdi"
+            log "Switching runtime mode to CDI..."
+            switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
+            log "Runtime mode successfully changed to CDI."
+        fi
     else
-        log "Current Runtime Mode : ${current_mode}"
-        log "Target  Runtime Mode : cdi"
-        log "Switching runtime mode to CDI..."
-        switch_runtime_to_cdi "$WORKER_NODE" "$log_file"
-        log "Runtime mode successfully changed to CDI."
+        log "CDI is disabled (CDI_ENABLED=false). Skipping CDI generation and runtime switch."
     fi
 
     # Step 6: Verify containerd is running before uncordoning
