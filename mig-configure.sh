@@ -166,12 +166,10 @@ cordon_node() {
 #
 # Returns:
 #   0 - MIG state reached "success" after MIN_SUCCESS_ATTEMPT polls
-#   1 - "success" detected too early (caller should retry with label cycling)
-#
-# Side effects:
-#   - Exits the script (exit 1) if failures exceed MAX_FAILED_ALLOWED
-#   - Exits the script (exit 1) on timeout (MAX_RETRIES reached while pending)
-#   - Exits the script (exit 1) on unexpected state values
+#   1 - Retriable failure: early success, timeout, or transient empty state
+#       (caller should retry with label cycling)
+#   2 - Fatal failure: "failed" state exceeded MAX_FAILED_ALLOWED
+#       (config YAML is likely wrong — retrying won't help)
 wait_for_mig_state() {
     log "Checking MIG state for node ${WORKER_NODE}..."
 
@@ -179,6 +177,12 @@ wait_for_mig_state() {
     local failed_count=0
 
     while true; do
+        # Global timeout — checked first so unexpected/empty states can't loop forever
+        if [[ $count -ge $MAX_RETRIES ]]; then
+            error "Timeout waiting for MIG success after ${count} attempts."
+            return 1
+        fi
+
         local state
         # -o jsonpath extracts a single value from the Kubernetes resource JSON.
         # The backslash-escaped dots (nvidia\.com) are literal dots in the label key.
@@ -208,18 +212,15 @@ wait_for_mig_state() {
 
             if [[ $failed_count -ge $MAX_FAILED_ALLOWED ]]; then
                 error "MIG configuration FAILED. Check your MIG config YAML."
-                exit 1
+                return 2
             fi
 
         elif [[ "$state" == "pending" ]]; then
-            if [[ $count -ge $MAX_RETRIES ]]; then
-                error "Timeout waiting for MIG success."
-                exit 1
-            fi
+            :  # still processing, keep polling
 
         else
-            error "Unexpected MIG state: '$state'"
-            exit 1
+            # Transient kubectl error or label propagation delay — keep polling
+            warn "Unexpected MIG state: '${state}' — treating as transient, will keep polling."
         fi
 
         sleep "$SLEEP_INTERVAL"
@@ -242,11 +243,13 @@ wait_for_mig_state() {
 # Side effects:
 #   - Applies the MIG ConfigMap to the cluster
 #   - Modifies nvidia.com/mig.config node label
-#   - Exits the script (exit 1) after MIG_MAX_APPLY_ATTEMPTS failures
+#   - Exits the script (exit 1) on fatal MIG failure (bad config YAML)
+#   - Exits the script (exit 1) after MIG_MAX_APPLY_ATTEMPTS retriable failures
 apply_mig_with_retry() {
     local attempt=1
 
-    while [[ $attempt -lt $MIG_MAX_APPLY_ATTEMPTS ]]; do
+    # -le (not -lt) so that attempt values 1..MIG_MAX_APPLY_ATTEMPTS all execute
+    while [[ $attempt -le $MIG_MAX_APPLY_ATTEMPTS ]]; do
         log "Applying custom MIG config (${MIG_CONFIG_FILE}) - Attempt ${attempt}"
 
         # -f = read resource definition from file
@@ -259,16 +262,23 @@ apply_mig_with_retry() {
         kubectl label node "$WORKER_NODE" nvidia.com/mig.config=custom-mig-config --overwrite >> "$LOG_FILE" 2>&1
         sleep "$CUSTOM_LABEL_SLEEP"
 
-        if wait_for_mig_state; then
+        # Capture return code: 0 = success, 1 = retriable, 2 = fatal
+        # || rc=$? suppresses ERR trap so the function can handle failures itself
+        local rc=0
+        wait_for_mig_state || rc=$?
+
+        if [[ $rc -eq 0 ]]; then
             log "MIG successfully applied."
             return 0
+        elif [[ $rc -eq 2 ]]; then
+            # Fatal failure (bad config YAML) — retrying won't help
+            error "Aborting: MIG configuration has a fatal error. Fix the config and re-run."
+            exit 1
         else
-            # Re-cycle labels to force the MIG Manager to re-evaluate
+            # rc=1: retriable failure — re-cycle labels for next attempt
             warn "Retrying — cycling labels to trigger MIG Manager re-evaluation..."
-
             kubectl label node "$WORKER_NODE" nvidia.com/mig.config=temp --overwrite >> "$LOG_FILE" 2>&1
             sleep "$TEMP_LABEL_SLEEP"
-
             kubectl label node "$WORKER_NODE" nvidia.com/mig.config=custom-mig-config --overwrite >> "$LOG_FILE" 2>&1
             sleep "$CUSTOM_LABEL_SLEEP"
         fi
