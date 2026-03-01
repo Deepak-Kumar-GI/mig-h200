@@ -1,84 +1,89 @@
-# Partitioning NVIDIA H200 GPUs with the GPU MIG Manager
+# NVIDIA DGX MIG Manager
 
----
+Automated toolkit for partitioning NVIDIA H200 GPUs via MIG on DGX Kubernetes clusters. Provides a whiptail-based TUI for profile selection and handles the full reprovisioning lifecycle — backup, runtime switching, MIG apply, CDI generation, and node management.
 
-## Main Procedure
+## Prerequisites
 
-### Step 1: Log in as root on the head node
+- Root access on the Kubernetes head node
+- `whiptail`, `kubectl`, `ssh`, `tput` installed
+- Passwordless SSH to the DGX worker node
+- NVIDIA GPU Operator deployed in the cluster
+
+## Quick Start (TUI)
+
+The recommended way to reconfigure MIG partitions:
 
 ```bash
-ssh <head-node>
+./mig-configure.sh
 ```
 
-### Step 2: Go to the GU headnode directory
+The TUI walks you through:
+
+1. **Welcome screen** — shows target node, GPU model, and current MIG state
+2. **Profile selection** — pick a MIG partition profile for each GPU (or apply one profile to all)
+3. **Review & confirm** — displays the selected configuration before applying
+
+Once confirmed, the tool automatically runs the full workflow: backup → cordon → apply MIG config → validate → CDI generation → uncordon.
+
+## Manual Workflow
+
+For advanced or custom configurations where you need direct control over the ConfigMap:
 
 ```bash
-cd /root/mig-partion/script
-```
-
-### Step 3: Execute the pre script
-
-```bash
+# Step 1: Backup configs, switch runtime to AUTO, cordon node
 ./pre.sh
-```
 
-### Step 4: Delete user pods/workloads if they exist
-
-### Step 5: Open the MIG configuration file
-
-```bash
+# Step 2: Edit the MIG partition layout
 nano custom-mig-config.yaml
-```
 
-### Step 6: Execute the post script
+# Step 3: Delete any active GPU workloads (dgx-* pods)
 
-```bash
+# Step 4: Apply MIG config, validate, generate CDI, uncordon
 ./post.sh
 ```
 
----
+## After DGX Restart
 
-## Restart Procedure
-
-> **Note:** If the DGX system restarts, run `restart.sh` 10–15 minutes after the DGX starts successfully.
-
-### Step 1: Log in as root on the head node
-
-```bash
-ssh <head-node>
-```
-
-### Step 2: Go to the directory
-
-```bash
-cd /root/mig-partion/script
-```
-
-### Step 3: Run the restart script
+If the DGX system reboots, wait **10–15 minutes** for the GPU Operator to initialize, then restore CDI mode:
 
 ```bash
 ./restart.sh
 ```
 
----
+> **Note:** When `CDI_ENABLED=false` in `config.sh`, `restart.sh` is a no-op.
 
-## Script Details
+## Configuration
 
-### `pre.sh`
+All tunable parameters live in `config.sh`:
 
-* Collect backup
-* Change mode from CDI to Auto
-* Cordon the worker node
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `WORKER_NODE` | `gu-k8s-worker` | Target Kubernetes worker node hostname |
+| `GPU_OPERATOR_NAMESPACE` | `gpu-operator` | Namespace for GPU Operator resources |
+| `CDI_ENABLED` | `true` | Enable/disable CDI runtime operations |
+| `LOG_RETENTION_DAYS` | `30` | Days to keep log directories (0 = disable cleanup) |
+| `MAX_RETRIES` | `15` | MIG state polling attempts before timeout |
+| `SLEEP_INTERVAL` | `20` | Seconds between MIG state polls |
+| `MIG_MAX_APPLY_ATTEMPTS` | `3` | Full apply-and-poll cycles before giving up |
 
-### `post.sh`
+MIG partition profiles are defined in `custom-mig-config-template.yaml`.
 
-* Apply configure
-* Check that the node label is successful
-* Verify the new MIG configuration
-* Generate CDI
-* Change mode from Auto to MIG
-* Uncordon the worker node
+## Logs
 
-### `restart.sh`
+Each run creates a timestamped directory under `logs/`:
 
-* Change mode from Auto to CDI
+```
+logs/20260301-143022/
+├── mig-configure.log        # Full operation log (or pre.log / post.log)
+└── backup/
+    ├── cluster-policy.yaml   # GPU Operator ClusterPolicy snapshot
+    ├── mig-configmap.yaml    # Previous MIG ConfigMap
+    └── node-mig-labels.txt   # Previous MIG node labels
+```
+
+Directories older than `LOG_RETENTION_DAYS` are automatically pruned at the start of each run.
+
+## Author
+
+GRIL Team — Global Infoventures
+<support.ai@giindia.com>
